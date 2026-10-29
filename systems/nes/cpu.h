@@ -1,10 +1,14 @@
 #pragma once
 
-#include <stdint>
+#include <cstdint>
 #include <string>
 
-namespace nas
+namespace nes
 {
+using std::uint8_t;
+using std::uint16_t;
+using std::uint64_t;
+
 class Bus;
 
 class CPU {
@@ -80,7 +84,7 @@ private:
 
     void branch();
 
-    struct Instructions
+    struct Instruction
     {
         const char* name;
         uint8_t (CPU::*op)();
@@ -99,4 +103,4 @@ private:
     
 };
 
-} // namespace name
+} // namespace nes

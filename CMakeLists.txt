@@ -1,45 +1,45 @@
 cmake_minimum_required(VERSION 3.16)
-project(nes LANGUAGES CXX)
+project(emu LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
     add_compile_options(/W4)
 else()
-    add_compile_options(-Wall -Wextra)
+    add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-set(NES_CORE
-    src/cpu.cpp
-    src/ppu.cpp
-    src/apu.cpp
-    src/bus.cpp
-    src/cartridge.cpp)
+add_library(emu_core
+    src/core/registry.cpp
+    systems/nes/nes_system.cpp
+    systems/nes/cpu.cpp
+    systems/nes/ppu.cpp
+    systems/nes/apu.cpp
+    systems/nes/bus.cpp
+    systems/nes/cartridge.cpp
+    systems/chip8/chip8.cpp
+    systems/chip8/chip8_vm.cpp)
+target_include_directories(emu_core PUBLIC src systems/nes systems/chip8)
 
-find_package(SDL2 REQUIRED)
-
-add_executable(nes src/main.cpp ${NES_CORE})
-
-if(TARGET SDL2::SDL2main)
-    target_link_libraries(nes PRIVATE SDL2::SDL2main)   # must precede SDL2
-endif()
-if(TARGET SDL2::SDL2)
-    target_link_libraries(nes PRIVATE SDL2::SDL2)
-else()
-    target_include_directories(nes PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(nes PRIVATE ${SDL2_LIBRARIES})
-endif()
-
-if(WIN32 AND TARGET SDL2::SDL2)
-    add_custom_command(TARGET nes POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:nes>)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+set(EMU_TEST_ROMS "${CMAKE_CURRENT_BINARY_DIR}/roms")
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/mkroms.py" "${EMU_TEST_ROMS}"
+    RESULT_VARIABLE ROM_GENERATION_RESULT
+    OUTPUT_QUIET)
+if(NOT ROM_GENERATION_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate test ROMs")
 endif()
 
 enable_testing()
-add_executable(nes_tests src/test_nes.cpp ${NES_CORE})
-add_test(NAME core
-         COMMAND nes_tests
-         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_executable(core_tests systems/test_core.cpp)
+target_link_libraries(core_tests PRIVATE emu_core)
+add_test(NAME core COMMAND core_tests)
+set_tests_properties(core PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+add_executable(binding_tests systems/test_bindings.cpp)
+target_link_libraries(binding_tests PRIVATE emu_core)
+add_test(NAME bindings COMMAND binding_tests)
+set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")

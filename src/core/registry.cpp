@@ -1,6 +1,7 @@
 #include "registry.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 
@@ -10,8 +11,6 @@ SystemPtr createNesSystem();
 SystemPtr createChip8System();
  
 const std::vector<CoreInfo>& registeredCores() {
-    // Add a console by adding a line here and linking its core. That is the
-    // entire integration cost once the core implements System.
     static const std::vector<CoreInfo> cores = {
         { "NES",     { "nes" },         createNesSystem   },
         { "CHIP-8",  { "ch8", "c8" },   createChip8System },
@@ -46,6 +45,7 @@ const char* sniff(const std::string& path) {
 }
  
 SystemPtr createForFile(const std::string& path, std::string& error) {
+    error.clear();
     const std::string ext = extensionOf(path);
  
     for (const CoreInfo& core : registeredCores()) {

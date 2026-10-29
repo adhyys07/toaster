@@ -1,4 +1,4 @@
-#include "../../core/system.h"
+#include "../../src/core/system.h"
 #include "bus.h"
 #include "cartridge.h"
 

@@ -33,7 +33,7 @@ public:
 
     virtual void runFrame() = 0;
 
-    virtual VideoFrame void() const = 0;
+    virtual VideoFrame video() const = 0;
     virtual double refreshRate() const = 0;
 
     virtual double aspectRatio() const {
