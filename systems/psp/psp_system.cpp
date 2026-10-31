@@ -80,10 +80,10 @@ int runPspGame(const std::string& core_path,
         return 1;
     }
 
-    LibretroHost host;
+    emu::libretro::LibretroHost host;
     std::string error;
     if (!host.run(resolved_core.string(), game_path, resolved_system.string(),
-                  fullscreen, mute, error)) {
+                  "PSP", fullscreen, mute, error)) {
         std::fprintf(stderr, "PSP error: %s\n", error.c_str());
         return 1;
     }

@@ -16,10 +16,20 @@
 
 # PPSSPP runtime assets and downloaded emulator cores
 /system/PPSSPP/
+/system/pcsx2/
 /cores/
+
+# Additional PS2 disc-image formats
+*.ciso
+*.zso
+*.m3u
+*.mdf
+*.nrg
+*.dump
 
 # Local save data
 /saves/
 /states/
 *.sav
 *.srm
+/settings.ini

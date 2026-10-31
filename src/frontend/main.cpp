@@ -12,7 +12,10 @@
 #include <SDL_ttf.h>
 #include "core/registry.h"
 #include "psp_system.h"
+#include "gl_fsr_upscaler.h"
 #include <array>
+#include "settings.h"
+#include "ps2_system.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -28,12 +31,14 @@ void printUsage(const char* exe) {
         "  --rom PATH          launch a ROM directly\n"
         "  --games-dir PATH    scan this folder in the startup library\n"
         "  --ppsspp-core PATH  path to the PPSSPP Libretro core\n"
-        "  --system-dir PATH   PPSSPP system assets folder (default: system)\n"
+        "  --ps2 PATH          launch a PS2 image directly\n"
+        "  --ps2-core PATH     path to the LRPS2 Libretro core\n"
+        "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
         "  --help\n"
         "\n"
-        "Without a ROM argument, open the game library. O opens a ROM file.\n"
+        "Without a ROM argument, open the game library. O opens a game file.\n"
         "F11 toggles fullscreen; Esc quits during gameplay.\n",
         exe);
 }
@@ -93,7 +98,10 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
 
         if (extension == ".ch8" || extension == ".c8" || extension == ".nes" ||
             extension == ".iso" || extension == ".cso" || extension == ".pbp" ||
-            extension == ".chd" || extension == ".elf" || extension == ".prx") {
+            extension == ".chd" || extension == ".elf" || extension == ".prx" ||
+            extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
+            extension == ".zso" || extension == ".mdf" || extension == ".nrg" ||
+            extension == ".dump" || extension == ".img") {
             games.push_back(readGameEntry(item.path()));
         }
     }
@@ -156,9 +164,127 @@ void drawMenuButton(SDL_Renderer* renderer, TTF_Font* font,
                  text_color);
 }
 
+bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
+    SDL_Window* window = SDL_CreateWindow(
+        "Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        760, 540, SDL_WINDOW_SHOWN);
+    if (!window) return false;
+
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    if (!renderer) {
+        SDL_DestroyWindow(window);
+        return false;
+    }
+
+    const emu::frontend::Settings original = settings;
+    const SDL_Rect mute_button{410, 90, 270, 44};
+    const SDL_Rect fullscreen_button{410, 145, 270, 44};
+    const SDL_Rect upscaler_button{410, 200, 270, 44};
+    const SDL_Rect sharpness_down{410, 255, 52, 44};
+    const SDL_Rect sharpness_up{628, 255, 52, 44};
+    const SDL_Rect save_button{410, 465, 125, 44};
+    const SDL_Rect cancel_button{555, 465, 125, 44};
+
+    bool running = true;
+    bool saved = false;
+    bool redraw = true;
+    while (running) {
+        if (redraw) {
+            int mouse_x = 0;
+            int mouse_y = 0;
+            SDL_GetMouseState(&mouse_x, &mouse_y);
+            SDL_SetRenderDrawColor(renderer, 17, 22, 28, 255);
+            SDL_RenderClear(renderer);
+
+            const SDL_Color gold{233, 216, 166, 255};
+            const SDL_Color white{235, 238, 240, 255};
+            const SDL_Color muted{160, 170, 180, 255};
+            drawMenuText(renderer, font, "SETTINGS", 36, 24, gold);
+            drawMenuText(renderer, font, "Mute audio", 60, 98, white);
+            drawMenuText(renderer, font, "Start fullscreen", 60, 153, white);
+            drawMenuText(renderer, font, "Upscaling filter", 60, 208, white);
+            drawMenuText(renderer, font, "FSR sharpness", 60, 263, white);
+
+            drawMenuButton(renderer, font, mute_button,
+                           settings.mute ? "On" : "Off", mouse_x, mouse_y);
+            drawMenuButton(renderer, font, fullscreen_button,
+                           settings.fullscreen ? "On" : "Off", mouse_x, mouse_y);
+            drawMenuButton(renderer, font, upscaler_button,
+                           emu::frontend::upscalerName(settings.upscaler),
+                           mouse_x, mouse_y);
+            drawMenuButton(renderer, font, sharpness_down, "-", mouse_x, mouse_y);
+            drawMenuButton(renderer, font, sharpness_up, "+", mouse_x, mouse_y);
+
+            char sharpness_text[32];
+            std::snprintf(sharpness_text, sizeof(sharpness_text), "%.2f",
+                          settings.sharpness);
+            drawMenuText(renderer, font, sharpness_text, 515, 267, white);
+            drawMenuText(renderer, font, "Nearest and Linear use SDL scaling.",
+                         36, 330, muted);
+            drawMenuText(renderer, font, "FSR 1 uses OpenGL EASU + RCAS passes.",
+                         36, 357, muted);
+            drawMenuText(renderer, font, "NES core currently supports mappers 0, 1, 2, 3, 7.",
+                         36, 397, muted, 680);
+            drawMenuText(renderer, font, "PICO-8 still requires a separate compatible core.",
+                         36, 425, muted, 680);
+            drawMenuButton(renderer, font, save_button, "Save", mouse_x, mouse_y);
+            drawMenuButton(renderer, font, cancel_button, "Cancel", mouse_x, mouse_y);
+            SDL_RenderPresent(renderer);
+            redraw = false;
+        }
+
+        SDL_Event event;
+        if (!SDL_WaitEvent(&event)) continue;
+        if (event.type == SDL_QUIT) {
+            settings = original;
+            running = false;
+        } else if (event.type == SDL_MOUSEMOTION) {
+            redraw = true;
+        } else if (event.type == SDL_KEYDOWN) {
+            if (event.key.keysym.sym == SDLK_ESCAPE) {
+                settings = original;
+                running = false;
+            } else if (event.key.keysym.sym == SDLK_RETURN ||
+                       event.key.keysym.sym == SDLK_KP_ENTER) {
+                saved = emu::frontend::saveSettings(settings);
+                running = false;
+            }
+        } else if (event.type == SDL_MOUSEBUTTONDOWN &&
+                   event.button.button == SDL_BUTTON_LEFT) {
+            if (pointInside(mute_button, event.button.x, event.button.y)) {
+                settings.mute = !settings.mute;
+                redraw = true;
+            } else if (pointInside(fullscreen_button, event.button.x, event.button.y)) {
+                settings.fullscreen = !settings.fullscreen;
+                redraw = true;
+            } else if (pointInside(upscaler_button, event.button.x, event.button.y)) {
+                emu::frontend::cycleUpscaler(settings);
+                redraw = true;
+            } else if (pointInside(sharpness_down, event.button.x, event.button.y)) {
+                settings.sharpness = std::max(0.0f, settings.sharpness - 0.05f);
+                redraw = true;
+            } else if (pointInside(sharpness_up, event.button.x, event.button.y)) {
+                settings.sharpness = std::min(1.0f, settings.sharpness + 0.05f);
+                redraw = true;
+            } else if (pointInside(save_button, event.button.x, event.button.y)) {
+                saved = emu::frontend::saveSettings(settings);
+                running = false;
+            } else if (pointInside(cancel_button, event.button.x, event.button.y)) {
+                settings = original;
+                running = false;
+            }
+        }
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    return saved;
+}
 std::string chooseRomFile();
 
-std::string showGameMenu(const fs::path& folder) {
+std::string showGameMenu(const fs::path& folder,
+                         emu::frontend::Settings& settings) {
     auto games = scanGames(folder);
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
@@ -200,6 +326,7 @@ std::string showGameMenu(const fs::path& folder) {
     const SDL_Rect launch_button{510, 548, 130, 44};
     const SDL_Rect open_button{650, 548, 140, 44};
     const SDL_Rect rescan_button{800, 548, 150, 44};
+    const SDL_Rect settings_button{830, 24, 130, 40};
     bool running = true;
     bool redraw = true;
     std::string result;
@@ -218,6 +345,11 @@ std::string showGameMenu(const fs::path& folder) {
             drawMenuText(menu_renderer, font,
              "Click a game, then Launch. O opens a ROM. Esc quits.",
              32, 65, muted);
+            int mouse_x = 0;
+            int mouse_y = 0;
+            SDL_GetMouseState(&mouse_x, &mouse_y);
+            drawMenuButton(menu_renderer, font, settings_button, "Settings",
+                           mouse_x, mouse_y);
 
             SDL_Rect divider{470, 105, 2, 500};
             SDL_SetRenderDrawColor(menu_renderer, 70, 80, 90, 255);
@@ -267,9 +399,6 @@ std::string showGameMenu(const fs::path& folder) {
                              510, 340, white, 440);
             }
 
-            int mouse_x = 0;
-            int mouse_y = 0;
-            SDL_GetMouseState(&mouse_x, &mouse_y);
             drawMenuButton(menu_renderer, font, launch_button, "Launch",
                            mouse_x, mouse_y);
             drawMenuButton(menu_renderer, font, open_button, "Open ROM",
@@ -311,6 +440,10 @@ std::string showGameMenu(const fs::path& folder) {
                     first_visible = 0;
                     redraw = true;
                     break;
+                case SDLK_s:
+                    showSettingsMenu(settings, font);
+                    redraw = true;
+                    break;
                 case SDLK_o: {
                     const std::string chosen_rom = chooseRomFile();
                     if (!chosen_rom.empty()) {
@@ -337,6 +470,12 @@ std::string showGameMenu(const fs::path& folder) {
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (event.button.button != SDL_BUTTON_LEFT) break;
+
+                if (pointInside(settings_button, event.button.x, event.button.y)) {
+                    showSettingsMenu(settings, font);
+                    redraw = true;
+                    break;
+                }
 
                 if (pointInside(launch_button, event.button.x, event.button.y)) {
                     if (!games.empty()) {
@@ -456,7 +595,10 @@ SDL_Scancode nesPlayerTwoKey(const char* button_name) {
     return SDL_SCANCODE_UNKNOWN;
 }
 
-int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen) {
+int runGenericGame(const std::string& rom_path,
+                   bool mute,
+                   bool start_fullscreen,
+                   const emu::frontend::Settings& settings) {
     std::string error;
     emu::SystemPtr system = emu::createForFile(rom_path, error);
     
@@ -481,7 +623,17 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
 
     std::string title = std::string(system->name()) + " - " + rom_path;
 
+    const bool use_fsr = settings.upscaler == emu::frontend::Upscaler::Fsr1;
+    if (use_fsr) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                            SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    }
+
     Uint32 window_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+    if (use_fsr) window_flags |= SDL_WINDOW_OPENGL;
     if (start_fullscreen) {
         window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
@@ -497,18 +649,48 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
         return EXIT_FAILURE;
     }
 
-    SDL_Renderer* renderer =
-        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    SDL_GLContext gl_context = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    emu::frontend::FsrUpscaler fsr;
+    if (use_fsr) {
+        gl_context = SDL_GL_CreateContext(window);
+        if (!gl_context) {
+            std::fprintf(stderr, "SDL_GL_CreateContext: %s\n", SDL_GetError());
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return EXIT_FAILURE;
+        }
 
-    if (!renderer) {
-        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    }
+        char* base_path = SDL_GetBasePath();
+        fs::path shader_directory = "assets/shaders";
+        if (base_path) {
+            const fs::path executable_shader_directory =
+                fs::path(base_path) / "assets" / "shaders";
+            if (fs::exists(executable_shader_directory / "fsr_easu.frag")) {
+                shader_directory = executable_shader_directory;
+            }
+            SDL_free(base_path);
+        }
 
-    if (!renderer) {
-        std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
-        SDL_DestroyWindow(window);
-        SDL_Quit();
-        return EXIT_FAILURE;
+        if (!fsr.initialize(window, shader_directory.string(), error)) {
+            std::fprintf(stderr, "FSR initialization failed: %s\n", error.c_str());
+            fsr.shutdown();
+            SDL_GL_DeleteContext(gl_context);
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return EXIT_FAILURE;
+        }
+    } else {
+        SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,
+                    settings.upscaler == emu::frontend::Upscaler::Linear ? "1" : "0");
+        renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+        if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+        if (!renderer) {
+            std::fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return EXIT_FAILURE;
+        }
     }
 
     int texture_width = 0;
@@ -534,10 +716,10 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
                                  texture_width * static_cast<int>(sizeof(uint32_t))) == 0;
     };
 
-    if (!updateTexture()) {
+    if (!use_fsr && !updateTexture()) {
         std::fprintf(stderr, "Could not create the game's video texture: %s\n", SDL_GetError());
         if (texture) SDL_DestroyTexture(texture);
-        SDL_DestroyRenderer(renderer);
+        if (renderer) SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
         SDL_Quit();
         return EXIT_FAILURE;
@@ -682,15 +864,23 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
         }
 
         system->runFrame();
-        if (!updateTexture()) {
-            std::fprintf(stderr, "Could not update the game image: %s\n", SDL_GetError());
-            break;
+        if (use_fsr) {
+            if (!fsr.render(system->video(), system->aspectRatio(),
+                            settings.sharpness, error)) {
+                std::fprintf(stderr, "FSR render failed: %s\n", error.c_str());
+                break;
+            }
+            SDL_GL_SwapWindow(window);
+        } else {
+            if (!updateTexture()) {
+                std::fprintf(stderr, "Could not update the game image: %s\n", SDL_GetError());
+                break;
+            }
+            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+            SDL_RenderClear(renderer);
+            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            SDL_RenderPresent(renderer);
         }
-
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        SDL_RenderCopy(renderer, texture, nullptr, nullptr);
-        SDL_RenderPresent(renderer);
 
         if (audio) {
             const size_t count = system->readAudio(audio_buffer.data(), audio_buffer.size());
@@ -720,7 +910,11 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
     }
     if (audio) SDL_CloseAudioDevice(audio);
     if (texture) SDL_DestroyTexture(texture);
-    SDL_DestroyRenderer(renderer);
+    if (renderer) SDL_DestroyRenderer(renderer);
+    if (gl_context) {
+        fsr.shutdown();
+        SDL_GL_DeleteContext(gl_context);
+    }
     SDL_DestroyWindow(window);
     SDL_Quit();
     return EXIT_SUCCESS;
@@ -733,8 +927,9 @@ std::string chooseRomFile() {
     OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter =
-        "Supported ROMs\0*.nes;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
+        "Supported games\0*.nes;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "PSP games\0*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
+        "PS2 games\0*.iso;*.cso;*.chd;*.elf;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "All files\0*.*\0";
     dialog.lpstrFile = filename;
     dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
@@ -750,21 +945,53 @@ std::string chooseRomFile() {
     return {};
 }
 
-bool isPspRom(const std::string& path) {
+enum class SelectedSystem {
+    Generic,
+    PSP,
+    PS2,
+    Cancel
+};
+
+SelectedSystem selectSystemForGame(const std::string& path) {
     std::string extension = fs::path(path).extension().string();
 
     std::transform(extension.begin(), extension.end(), extension.begin(),
         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-    return extension == ".iso" || extension == ".cso" ||
-           extension == ".pbp" || extension == ".chd" ||
-           extension == ".elf" || extension == ".prx";
+    if (extension == ".pbp" || extension == ".prx")
+        return SelectedSystem::PSP;
+    if (extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
+        extension == ".zso" || extension == ".mdf" || extension == ".nrg" ||
+        extension == ".dump" || extension == ".img")
+        return SelectedSystem::PS2;
+    if (extension != ".iso" && extension != ".cso" &&
+        extension != ".chd" && extension != ".elf")
+        return SelectedSystem::Generic;
+
+    const SDL_MessageBoxButtonData buttons[] = {
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "PSP"},
+        {0, 1, "PS2"},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Cancel"}
+    };
+    SDL_MessageBoxData dialog{};
+    dialog.flags = SDL_MESSAGEBOX_INFORMATION;
+    dialog.window = nullptr;
+    dialog.title = "Choose console";
+    dialog.message = "This file type can be used by PSP or PS2. Which system should open it?";
+    dialog.numbuttons = static_cast<int>(sizeof(buttons) / sizeof(buttons[0]));
+    dialog.buttons = buttons;
+
+    int selected = 2;
+    if (SDL_ShowMessageBox(&dialog, &selected) != 0 || selected == 2)
+        return SelectedSystem::Cancel;
+    return selected == 1 ? SelectedSystem::PS2 : SelectedSystem::PSP;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string rom_path;
+    emu::frontend::Settings settings = emu::frontend::loadSettings();
 #ifdef _WIN32
     std::string psp_core = "cores/ppsspp_libretro.dll";
 #elif __APPLE__
@@ -772,10 +999,18 @@ int main(int argc, char** argv) {
 #else
     std::string psp_core = "cores/ppsspp_libretro.so";
 #endif
+#ifdef _WIN32
+    std::string ps2_core = "cores/pcsx2_libretro.dll";
+#elif __APPLE__
+    std::string ps2_core = "cores/pcsx2_libretro.dylib";
+#else
+    std::string ps2_core = "cores/pcsx2_libretro.so";
+#endif
+    std::string ps2_game_path;
     std::string system_directory = "system";
     fs::path games_folder = "games";
-    bool mute = false;
-    bool fullscreen = false;
+    bool mute = settings.mute;
+    bool fullscreen = settings.fullscreen;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -790,6 +1025,16 @@ int main(int argc, char** argv) {
             psp_core = argv[++i];
         } else if (arg == "--ppsspp-core") {
             std::fprintf(stderr, "--ppsspp-core requires a path to the PPSSPP Libretro core\n");
+            return EXIT_FAILURE;
+        } else if (arg == "--ps2-core" && i + 1 < argc) {
+            ps2_core = argv[++i];
+        } else if (arg == "--ps2-core") {
+            std::fprintf(stderr, "--ps2-core requires a path to the LRPS2 Libretro core\n");
+            return EXIT_FAILURE;
+        } else if (arg == "--ps2" && i + 1 < argc) {
+            ps2_game_path = argv[++i];
+        } else if (arg == "--ps2") {
+            std::fprintf(stderr, "--ps2 requires a game file path\n");
             return EXIT_FAILURE;
         } else if (arg == "--system-dir" && i + 1 < argc) {
             system_directory = argv[++i];
@@ -811,26 +1056,51 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!ps2_game_path.empty() && !rom_path.empty()) {
+        std::fprintf(stderr, "Use either --ps2 PATH or --rom PATH, not both.\n");
+        return EXIT_FAILURE;
+    }
+
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return EXIT_FAILURE;
     }
 
-    if (rom_path.empty()) {
-        rom_path = showGameMenu(games_folder);
+    if (rom_path.empty() && ps2_game_path.empty()) {
+        rom_path = showGameMenu(games_folder, settings);
+        mute = settings.mute;
+        fullscreen = settings.fullscreen;
         if (rom_path.empty()) {
             SDL_Quit();
             return EXIT_SUCCESS;
         }
     }
 
-    if (isPspRom(rom_path)) {
+    if (!ps2_game_path.empty()) {
+        const int result = emu::ps2::runPs2Game(
+            ps2_core, ps2_game_path, system_directory, fullscreen, mute);
+        SDL_Quit();
+        return result;
+    }
+
+    const SelectedSystem selected_system = selectSystemForGame(rom_path);
+    if (selected_system == SelectedSystem::Cancel) {
+        SDL_Quit();
+        return EXIT_SUCCESS;
+    }
+    if (selected_system == SelectedSystem::PS2) {
+        const int result = emu::ps2::runPs2Game(
+            ps2_core, rom_path, system_directory, fullscreen, mute);
+        SDL_Quit();
+        return result;
+    }
+    if (selected_system == SelectedSystem::PSP) {
         const int result = emu::psp::runPspGame(
             psp_core, rom_path, system_directory, fullscreen, mute);
         SDL_Quit();
         return result;
     }
 
-    return runGenericGame(rom_path, mute, fullscreen);
+    return runGenericGame(rom_path, mute, fullscreen, settings);
 }

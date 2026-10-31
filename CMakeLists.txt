@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
-project(emu LANGUAGES CXX)
+project(emu LANGUAGES C CXX)
+
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,10 +48,18 @@ set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINA
 find_package(SDL2 REQUIRED)
 add_executable(emu
     src/frontend/main.cpp
+    src/frontend/gl_fsr_upscaler.cpp
+    src/frontend/settings.cpp
     systems/psp/libretro_host.cpp
-    systems/psp/psp_system.cpp)
-target_include_directories(emu PRIVATE systems/psp)
+    systems/psp/psp_system.cpp
+    systems/ps2/ps2_system.cpp)
+target_include_directories(emu PRIVATE systems/psp systems/ps2)
 target_link_libraries(emu PRIVATE emu_core)
+
+add_custom_command(TARGET emu POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
+            "$<TARGET_FILE_DIR:emu>/assets/shaders")
 
 if(WIN32)
     # Find the actual import library path so MinGW links libopengl32.a instead

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdint>
@@ -30,7 +31,7 @@
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #endif
 
-namespace emu::psp {
+namespace emu::libretro {
 namespace {
 
 struct LibretroApi {
@@ -59,6 +60,7 @@ public:
     bool run(const std::string& core_path,
              const std::string& game_path,
              const std::string& system_directory,
+             const std::string& system_name,
              bool fullscreen,
              bool mute,
              std::string& error) {
@@ -66,13 +68,15 @@ public:
             std::fprintf(stderr, "Controller support unavailable: %s\n", SDL_GetError());
         }
         if (!mute && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-            std::fprintf(stderr, "PSP audio unavailable: %s\n", SDL_GetError());
+            std::fprintf(stderr, "%s audio unavailable: %s\n",
+                         system_name.c_str(), SDL_GetError());
         }
         system_directory_ = system_directory;
+        system_name_ = system_name;
         mute_ = mute;
         active_ = this;
 
-        if (!createWindow(game_path, fullscreen, error) ||
+        if (!createWindow(game_path, system_name_, fullscreen, error) ||
             !loadCore(core_path, error) || !initializeCore(game_path, error)) {
             shutdown();
             return false;
@@ -108,6 +112,7 @@ private:
     int16_t right_analog_x_ = 0;
     int16_t right_analog_y_ = 0;
     std::string system_directory_;
+    std::string system_name_;
     std::map<std::string, std::string> core_options_;
     std::vector<int16_t> audio_frames_;
     GLuint framebuffer_ = 0;
@@ -159,7 +164,8 @@ private:
         if (data != RETRO_HW_FRAME_BUFFER_VALID) {
             if (data && !active_->logged_video_frame_) {
                 std::fprintf(stderr,
-                    "[PSP] Core submitted a software frame; this host expects an OpenGL hardware frame.\n");
+                    "[%s] Core submitted a software frame; this host expects an OpenGL hardware frame.\n",
+                    active_->system_name_.c_str());
                 active_->logged_video_frame_ = true;
             }
             return;
@@ -167,7 +173,8 @@ private:
         active_->frame_width_ = std::min(width, active_->framebuffer_width_);
         active_->frame_height_ = std::min(height, active_->framebuffer_height_);
         if (!active_->logged_video_frame_) {
-            std::fprintf(stderr, "[PSP] Received OpenGL frame: %ux%u (FBO %ux%u).\n",
+            std::fprintf(stderr, "[%s] Received OpenGL frame: %ux%u (FBO %ux%u).\n",
+                         active_->system_name_.c_str(),
                          active_->frame_width_, active_->frame_height_,
                          active_->framebuffer_width_, active_->framebuffer_height_);
             active_->logged_video_frame_ = true;
@@ -197,7 +204,7 @@ private:
             !loadGlFunction(delete_framebuffers_, "glDeleteFramebuffers") ||
             !loadGlFunction(delete_renderbuffers_, "glDeleteRenderbuffers") ||
             !loadGlFunction(blit_framebuffer_, "glBlitFramebuffer")) {
-            error = "the OpenGL driver is missing framebuffer functions required by PPSSPP";
+            error = "the OpenGL driver is missing framebuffer functions required by the core";
             return false;
         }
 
@@ -235,7 +242,7 @@ private:
         bind_framebuffer_(GL_FRAMEBUFFER, 0);
         glBindTexture(GL_TEXTURE_2D, 0);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
-            error = "could not create a complete OpenGL framebuffer for PPSSPP";
+            error = "could not create a complete OpenGL framebuffer for the core";
             destroyFramebuffer();
             return false;
         }
@@ -243,7 +250,8 @@ private:
     }
 
     void presentFramebuffer() {
-        if (!framebuffer_ || !blit_framebuffer_) return;
+        if (!framebuffer_ || !blit_framebuffer_ ||
+            drawable_width_ <= 0 || drawable_height_ <= 0) return;
         // A core may leave scissoring enabled. That state can clip the
         // frontend's framebuffer blit and leave the window looking black.
         glDisable(GL_SCISSOR_TEST);
@@ -251,10 +259,28 @@ private:
         glReadBuffer(GL_COLOR_ATTACHMENT0);
         bind_framebuffer_(GL_DRAW_FRAMEBUFFER, 0);
         glDrawBuffer(GL_BACK);
+        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        int target_width = drawable_width_;
+        int target_height = drawable_height_;
+        const double window_aspect = static_cast<double>(drawable_width_) /
+                                     std::max(drawable_height_, 1);
+        const double source_aspect = aspect_ratio_ > 0.0
+            ? aspect_ratio_
+            : static_cast<double>(frame_width_) / std::max(frame_height_, 1u);
+        if (window_aspect > source_aspect) {
+            target_width = static_cast<int>(std::lround(drawable_height_ * source_aspect));
+        } else {
+            target_height = static_cast<int>(std::lround(drawable_width_ / source_aspect));
+        }
+        const int target_x = (drawable_width_ - target_width) / 2;
+        const int target_y = (drawable_height_ - target_height) / 2;
         blit_framebuffer_(0, 0,
                           static_cast<GLint>(frame_width_),
                           static_cast<GLint>(frame_height_),
-                          0, 0, drawable_width_, drawable_height_,
+                          target_x, target_y,
+                          target_x + target_width, target_y + target_height,
                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
         bind_framebuffer_(GL_FRAMEBUFFER, 0);
     }
@@ -348,7 +374,8 @@ private:
             if (callback->context_type != RETRO_HW_CONTEXT_OPENGL_CORE &&
                 callback->context_type != RETRO_HW_CONTEXT_OPENGL) {
                 std::fprintf(stderr,
-                    "This PSP core requested an unsupported rendering API (%d).\n",
+                    "This %s core requested an unsupported rendering API (%d).\n",
+                    host.system_name_.c_str(),
                     static_cast<int>(callback->context_type));
                 return false;
             }
@@ -411,8 +438,51 @@ private:
             static_cast<retro_log_callback*>(data)->log = logMessage;
             return true;
         case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
-            if (data) *static_cast<unsigned*>(data) = 1;
+            if (data) *static_cast<unsigned*>(data) = 2;
             return true;
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2: {
+            if (!data) return false;
+            const auto* options = static_cast<const retro_core_options_v2*>(data);
+            if (options->definitions) {
+                for (const auto* option = options->definitions; option->key; ++option) {
+                    if (option->default_value)
+                        host.core_options_[option->key] = option->default_value;
+                }
+            }
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL: {
+            if (!data) return false;
+            const auto* options = static_cast<const retro_core_options_v2_intl*>(data);
+            if (options->us && options->us->definitions) {
+                for (const auto* option = options->us->definitions;
+                     option->key; ++option) {
+                    if (option->default_value)
+                        host.core_options_[option->key] = option->default_value;
+                }
+            }
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS: {
+            if (!data) return false;
+            const auto* options = static_cast<const retro_core_option_definition*>(data);
+            for (const auto* option = options; option->key; ++option) {
+                if (option->default_value)
+                    host.core_options_[option->key] = option->default_value;
+            }
+            return true;
+        }
+        case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL: {
+            if (!data) return false;
+            const auto* options = static_cast<const retro_core_options_intl*>(data);
+            if (options->us) {
+                for (const auto* option = options->us; option->key; ++option) {
+                    if (option->default_value)
+                        host.core_options_[option->key] = option->default_value;
+                }
+            }
+            return true;
+        }
         case RETRO_ENVIRONMENT_GET_LANGUAGE:
             if (data) *static_cast<unsigned*>(data) = RETRO_LANGUAGE_ENGLISH;
             return true;
@@ -434,7 +504,9 @@ private:
         }
     }
 
-    bool createWindow(const std::string& game_path, bool fullscreen,
+    bool createWindow(const std::string& game_path,
+                      const std::string& system_name,
+                      bool fullscreen,
                       std::string& error) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -445,7 +517,7 @@ private:
 
         Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
         if (fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-        const std::string title = "PSP - " + game_path;
+        const std::string title = system_name + " - " + game_path;
         window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED,
                                    SDL_WINDOWPOS_CENTERED, 960, 544, flags);
         if (!window_) {
@@ -534,7 +606,7 @@ private:
         }
         game_loaded_ = true;
         if (!hw_render_requested_) {
-            error = "the core did not request hardware rendering; this PSP host needs OpenGL rendering";
+            error = "the core did not request hardware rendering; this host needs OpenGL rendering";
             return false;
         }
 
@@ -544,6 +616,11 @@ private:
             ? av.geometry.max_width : av.geometry.base_width;
         const unsigned render_height = av.geometry.max_height
             ? av.geometry.max_height : av.geometry.base_height;
+        aspect_ratio_ = av.geometry.aspect_ratio > 0.0f
+            ? av.geometry.aspect_ratio
+            : (av.geometry.base_height
+                ? static_cast<double>(av.geometry.base_width) / av.geometry.base_height
+                : 4.0 / 3.0);
         if (SDL_GL_MakeCurrent(window_, gl_context_) != 0) {
             error = std::string("could not activate OpenGL context: ") + SDL_GetError();
             return false;
@@ -567,13 +644,16 @@ private:
             audio_device_ = SDL_OpenAudioDevice(nullptr, 0, &wanted_audio_spec_,
                                                  &obtained_audio_spec_, 0);
             if (audio_device_) SDL_PauseAudioDevice(audio_device_, 0);
-            else std::fprintf(stderr, "PSP audio unavailable: %s\n", SDL_GetError());
+            else std::fprintf(stderr, "%s audio unavailable: %s\n",
+                              system_name_.c_str(), SDL_GetError());
         }
-        std::fprintf(stderr, "[PSP] Game loaded: %s\n", game_path.c_str());
+        std::fprintf(stderr, "[%s] Game loaded: %s\n",
+                     system_name_.c_str(), game_path.c_str());
         std::fprintf(stderr,
-                     "[PSP] Keys: arrows/numpad 2-4-6-8 D-pad; WASD left stick; "
+                     "[%s] Keys: arrows/numpad 2-4-6-8 D-pad; WASD left stick; "
                      "IJKL right stick; Z Cross, X Circle, C Square, V Triangle; "
-                     "Q/E L/R; Enter Start; Backspace Select.\n");
+                     "Q/E L1/R1; 1/3 L2/R2; Enter Start; Backspace Select.\n",
+                     system_name_.c_str());
         return true;
     }
 
@@ -585,8 +665,8 @@ private:
             if (pressed) state = static_cast<uint16_t>(state | (1u << id));
         };
 
-        // PPSSPP's libretro mapping is B=Cross, A=Circle, X=Triangle, Y=Square.
-        // Face keys are Z/X/C/V; WASD drives the PSP analog stick.
+        // Standard PlayStation face layout: B=Cross, A=Circle,
+        // X=Triangle, Y=Square. Z/X/C/V are the face keys.
         set(RETRO_DEVICE_ID_JOYPAD_B, keys[SDL_SCANCODE_Z]); // Cross
         set(RETRO_DEVICE_ID_JOYPAD_A, keys[SDL_SCANCODE_X]); // Circle
         set(RETRO_DEVICE_ID_JOYPAD_Y, keys[SDL_SCANCODE_C]); // Square
@@ -605,6 +685,8 @@ private:
             keys[SDL_SCANCODE_RIGHT] || keys[SDL_SCANCODE_KP_6]);
         set(RETRO_DEVICE_ID_JOYPAD_L, keys[SDL_SCANCODE_Q]);
         set(RETRO_DEVICE_ID_JOYPAD_R, keys[SDL_SCANCODE_E]);
+        set(RETRO_DEVICE_ID_JOYPAD_L2, keys[SDL_SCANCODE_1]);
+        set(RETRO_DEVICE_ID_JOYPAD_R2, keys[SDL_SCANCODE_3]);
 
         analog_x_ = static_cast<int16_t>((keys[SDL_SCANCODE_D] ? 32767 : 0) -
                                          (keys[SDL_SCANCODE_A] ? 32768 : 0));
@@ -620,7 +702,7 @@ private:
                 return SDL_GameControllerGetButton(controller_, id) != 0;
             };
             // Xbox-style controller buttons: bottom=A, right=B, left=X, top=Y.
-            // Map those positions to PSP Cross, Circle, Square, Triangle.
+            // Map those positions to Cross, Circle, Square, Triangle.
             set(RETRO_DEVICE_ID_JOYPAD_B, button(SDL_CONTROLLER_BUTTON_A)); // Cross
             set(RETRO_DEVICE_ID_JOYPAD_A, button(SDL_CONTROLLER_BUTTON_B)); // Circle
             set(RETRO_DEVICE_ID_JOYPAD_Y, button(SDL_CONTROLLER_BUTTON_X)); // Square
@@ -636,9 +718,11 @@ private:
             const Sint16 right_trigger = SDL_GameControllerGetAxis(
                 controller_, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
             set(RETRO_DEVICE_ID_JOYPAD_L,
-                button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER) || left_trigger > 16000);
+                button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER));
             set(RETRO_DEVICE_ID_JOYPAD_R,
-                button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) || right_trigger > 16000);
+                button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER));
+            set(RETRO_DEVICE_ID_JOYPAD_L2, left_trigger > 16000);
+            set(RETRO_DEVICE_ID_JOYPAD_R2, right_trigger > 16000);
             constexpr int deadzone = 7000;
             const Sint16 controller_x = SDL_GameControllerGetAxis(
                 controller_, SDL_CONTROLLER_AXIS_LEFTX);
@@ -694,6 +778,12 @@ private:
                 ? SDL_JoystickGetAxis(raw_joystick_, 2) : 0;
             const Sint16 controller_right_y = axis_count > 3
                 ? SDL_JoystickGetAxis(raw_joystick_, 3) : 0;
+            const Sint16 left_trigger = axis_count > 4
+                ? SDL_JoystickGetAxis(raw_joystick_, 4) : 0;
+            const Sint16 right_trigger = axis_count > 5
+                ? SDL_JoystickGetAxis(raw_joystick_, 5) : 0;
+            set(RETRO_DEVICE_ID_JOYPAD_L2, left_trigger > 16000);
+            set(RETRO_DEVICE_ID_JOYPAD_R2, right_trigger > 16000);
             if (std::abs(static_cast<int>(controller_x)) >= deadzone)
                 analog_x_ = controller_x;
             if (std::abs(static_cast<int>(controller_y)) >= deadzone)
@@ -720,7 +810,8 @@ private:
         }
         if (controller_) {
             const char* name = SDL_GameControllerName(controller_);
-            std::fprintf(stderr, "[PSP] Controller connected: %s\n",
+            std::fprintf(stderr, "[%s] Controller connected: %s\n",
+                         system_name_.c_str(),
                          name ? name : "(unnamed)");
             return;
         }
@@ -733,7 +824,8 @@ private:
         if (raw_joystick_) {
             const char* name = SDL_JoystickName(raw_joystick_);
             std::fprintf(stderr,
-                         "[PSP] Unmapped joystick connected: %s (using common button layout)\n",
+                         "[%s] Unmapped joystick connected: %s (using common button layout)\n",
+                         system_name_.c_str(),
                          name ? name : "(unnamed)");
         }
     }
@@ -779,7 +871,8 @@ private:
             }
 
             if (SDL_GL_MakeCurrent(window_, gl_context_) != 0) {
-                std::fprintf(stderr, "Could not activate PSP OpenGL context: %s\n", SDL_GetError());
+                std::fprintf(stderr, "Could not activate %s OpenGL context: %s\n",
+                             system_name_.c_str(), SDL_GetError());
                 break;
             }
             SDL_GL_GetDrawableSize(window_, &drawable_width_, &drawable_height_);
@@ -825,7 +918,7 @@ private:
             SDL_CloseAudioDevice(audio_device_);
             audio_device_ = 0;
         }
-        // PPSSPP's context_destroy callback accesses its live graphics context.
+        // Keep the core's live graphics context current during context teardown.
         // Notify it while the core and game are still initialized.
         if (hw_context_active_ && hw_render_.context_destroy && gl_context_) {
             SDL_GL_MakeCurrent(window_, gl_context_);
@@ -868,6 +961,7 @@ private:
     }
 
     double frame_duration_ = 1.0 / 60.0;
+    double aspect_ratio_ = 4.0 / 3.0;
     int drawable_width_ = 960;
     int drawable_height_ = 544;
 };
@@ -879,11 +973,13 @@ HostState* HostState::active_ = nullptr;
 bool LibretroHost::run(const std::string& core_path,
                        const std::string& game_path,
                        const std::string& system_directory,
+                       const std::string& system_name,
                        bool fullscreen,
                        bool mute,
                        std::string& error) {
     HostState host;
-    return host.run(core_path, game_path, system_directory, fullscreen, mute, error);
+    return host.run(core_path, game_path, system_directory, system_name,
+                    fullscreen, mute, error);
 }
 
-}  // namespace emu::psp
+}  // namespace emu::libretro
