@@ -404,13 +404,13 @@ std::string normalizedButtonName(const char* name) {
 }
 
 bool gamepadButtonDown(SDL_GameController* controller,
-                        const char* button_name,
-                        bool is_pico8){
+                       const char* button_name,
+                       bool is_pico8) {
     if (!controller) return false;
 
     const std::string name = normalizedButtonName(button_name);
 
-    const auto pressed = [controller](SDL_GameControllerButton button){
+    const auto pressed = [controller](SDL_GameControllerButton button) {
         return SDL_GameControllerGetButton(controller, button) != 0;
     };
 
@@ -439,22 +439,22 @@ bool gamepadButtonDown(SDL_GameController* controller,
         return pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || left_x > deadzone;
 
     return false;
-    }
-    
-    SDL_Scancode nesPlayerTwoKey(const char* button_name){
-        const std::string name = normalizedButtonName(button_name);
+}
 
-        if (name == "UP") return SDL_SCANCODE_W;
-        if (name == "DOWN") return SDL_SCANCODE_S;
-        if (name == "LEFT") return SDL_SCANCODE_A;
-        if (name == "RIGHT") return SDL_SCANCODE_D;
-        if (name == "A") return SDL_SCANCODE_K;
-        if (name == "B") return SDL_SCANCODE_J;
-        if (name == "START") return SDL_SCANCODE_I;
-        if (name == "SELECT") return SDL_SCANCODE_U;
+SDL_Scancode nesPlayerTwoKey(const char* button_name) {
+    const std::string name = normalizedButtonName(button_name);
 
-        return SDL_SCANCODE_UNKNOWN;
-    }
+    if (name == "UP") return SDL_SCANCODE_W;
+    if (name == "DOWN") return SDL_SCANCODE_S;
+    if (name == "LEFT") return SDL_SCANCODE_A;
+    if (name == "RIGHT") return SDL_SCANCODE_D;
+    if (name == "A") return SDL_SCANCODE_K;
+    if (name == "B") return SDL_SCANCODE_J;
+    if (name == "START") return SDL_SCANCODE_I;
+    if (name == "SELECT") return SDL_SCANCODE_U;
+
+    return SDL_SCANCODE_UNKNOWN;
+}
 
 int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen) {
     std::string error;
@@ -601,7 +601,6 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
         std::fprintf(stderr, "Controller support unavailable: %s\n", SDL_GetError());
     }
 
-
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -618,10 +617,10 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
                     std::fprintf(stderr, "Could not toggle fullscreen: %s\n", SDL_GetError());
                 }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
-                // SDL provides a device index for controller-added events.
+                // Added events carry a device index.
                 openGamepad(event.cdevice.which);
             } else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
-                // Removal events provide the joystick instance ID.
+                // Removed events carry the joystick instance ID.
                 for (SDL_GameController*& gamepad : gamepads) {
                     if (!gamepad) continue;
 
@@ -644,19 +643,16 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
 
             for (const emu::ButtonInfo& button : system->buttons()) {
                 bool down = false;
-                const std::string button_name =
-                    normalizedButtonName(button.name);
+                const std::string button_name = normalizedButtonName(button.name);
 
-                // Player 1 uses the core's declared keyboard bindings.
+                // Player 1 uses the keyboard bindings declared by the core.
                 if (port == 0 && button.default_key) {
                     const SDL_Scancode key =
                         SDL_GetScancodeFromName(button.default_key);
-                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
-                        down = true;
-                    }
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) down = true;
                 }
 
-                // PICO-8's two action buttons have common keyboard aliases.
+                // Common PICO-8 keyboard aliases for its two action buttons.
                 if (port == 0 && is_pico8) {
                     if (button_name == "O") {
                         down = down || keyboard[SDL_SCANCODE_Z] ||
@@ -667,12 +663,10 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
                     }
                 }
 
-                // Optional second-player keyboard layout for the NES.
+                // Player 2 keyboard bindings for NES.
                 if (port == 1 && system_name == "NES") {
                     const SDL_Scancode key = nesPlayerTwoKey(button.name);
-                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
-                        down = true;
-                    }
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) down = true;
                 }
 
                 // Controller slot 0 drives port 0; slot 1 drives port 1.
