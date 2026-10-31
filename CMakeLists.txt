@@ -45,17 +45,30 @@ add_test(NAME bindings COMMAND binding_tests)
 set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 find_package(SDL2 REQUIRED)
-add_executable(emu src/frontend/main.cpp)
+add_executable(emu
+    src/frontend/main.cpp
+    systems/psp/libretro_host.cpp
+    systems/psp/psp_system.cpp)
+target_include_directories(emu PRIVATE systems/psp)
 target_link_libraries(emu PRIVATE emu_core)
 
 if(WIN32)
-    # Resolve the platform's actual library file. This works with both
-    # MSVC's comdlg32.lib and MinGW's libcomdlg32.a.
+    # Find the actual import library path so MinGW links libopengl32.a instead
+    # of passing the MSVC-style name "opengl32.lib" to its linker.
+    find_library(OPENGL32_LIBRARY NAMES opengl32)
+    if(NOT OPENGL32_LIBRARY)
+        message(FATAL_ERROR "Could not find the Windows OpenGL library (opengl32)")
+    endif()
+    target_link_libraries(emu PRIVATE "${OPENGL32_LIBRARY}")
+
     find_library(COMDLG32_LIBRARY NAMES comdlg32)
     if(NOT COMDLG32_LIBRARY)
         message(FATAL_ERROR "Could not find the Windows common-dialog library (comdlg32)")
     endif()
     target_link_libraries(emu PRIVATE "${COMDLG32_LIBRARY}")
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(emu PRIVATE OpenGL::GL)
 endif()
 
 find_package(SDL2_ttf REQUIRED)

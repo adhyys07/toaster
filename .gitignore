@@ -1,1 +1,25 @@
-build
+/build/
+/cmake-build-*/
+
+# User game library and imported ROMs
+/games/
+*.nes
+*.ch8
+*.c8
+*.p8
+*.iso
+*.cso
+*.pbp
+*.chd
+*.elf
+*.prx
+
+# PPSSPP runtime assets and downloaded emulator cores
+/system/PPSSPP/
+/cores/
+
+# Local save data
+/saves/
+/states/
+*.sav
+*.srm

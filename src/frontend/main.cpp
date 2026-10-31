@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <SDL_ttf.h>
 #include "core/registry.h"
+#include "psp_system.h"
+#include <array>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -25,6 +27,8 @@ void printUsage(const char* exe) {
         "\n"
         "  --rom PATH          launch a ROM directly\n"
         "  --games-dir PATH    scan this folder in the startup library\n"
+        "  --ppsspp-core PATH  path to the PPSSPP Libretro core\n"
+        "  --system-dir PATH   PPSSPP system assets folder (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
         "  --help\n"
@@ -87,7 +91,9 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
                 std::tolower(static_cast<unsigned char>(ch)));
         }
 
-        if (extension == ".ch8" || extension == ".c8" || extension == ".nes") {
+        if (extension == ".ch8" || extension == ".c8" || extension == ".nes" ||
+            extension == ".iso" || extension == ".cso" || extension == ".pbp" ||
+            extension == ".chd" || extension == ".elf" || extension == ".prx") {
             games.push_back(readGameEntry(item.path()));
         }
     }
@@ -220,7 +226,8 @@ std::string showGameMenu(const fs::path& folder) {
             if (games.empty()) {
                 drawMenuText(menu_renderer, font, "No games found",
                              36, list_top + 10, gold);
-                drawMenuText(menu_renderer, font, "Add .nes, .ch8, or .c8 ROMs to:",
+                drawMenuText(menu_renderer, font,
+                             "Add NES, CHIP-8, or PSP games to:",
                              36, list_top + 50, white);
                 drawMenuText(menu_renderer, font, folder.string(),
                              36, list_top + 80, muted);
@@ -389,6 +396,66 @@ std::string showGameMenu(const fs::path& folder) {
     return result;
 }
 
+std::string normalizedButtonName(const char* name) {
+    std::string result = name ? name : "";
+    std::transform(result.begin(), result.end(), result.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return result;
+}
+
+bool gamepadButtonDown(SDL_GameController* controller,
+                        const char* button_name,
+                        bool is_pico8){
+    if (!controller) return false;
+
+    const std::string name = normalizedButtonName(button_name);
+
+    const auto pressed = [controller](SDL_GameControllerButton button){
+        return SDL_GameControllerGetButton(controller, button) != 0;
+    };
+
+    const Sint16 left_x =
+        SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
+    const Sint16 left_y =
+        SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
+    constexpr Sint16 deadzone = 16000;
+    
+    if (name == "A" || (is_pico8 && name == "O"))
+        return pressed(SDL_CONTROLLER_BUTTON_A);
+    if (name == "B" || (is_pico8 && name == "X"))
+        return pressed(SDL_CONTROLLER_BUTTON_B);
+    if (name == "SELECT")
+        return pressed(SDL_CONTROLLER_BUTTON_BACK);
+    if (name == "START" || (is_pico8 && name == "PAUSE"))
+        return pressed(SDL_CONTROLLER_BUTTON_START);
+
+    if (name == "UP")
+        return pressed(SDL_CONTROLLER_BUTTON_DPAD_UP) || left_y < -deadzone;
+    if (name == "DOWN")
+        return pressed(SDL_CONTROLLER_BUTTON_DPAD_DOWN) || left_y > deadzone;
+    if (name == "LEFT")
+        return pressed(SDL_CONTROLLER_BUTTON_DPAD_LEFT) || left_x < -deadzone;
+    if (name == "RIGHT")
+        return pressed(SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || left_x > deadzone;
+
+    return false;
+    }
+    
+    SDL_Scancode nesPlayerTwoKey(const char* button_name){
+        const std::string name = normalizedButtonName(button_name);
+
+        if (name == "UP") return SDL_SCANCODE_W;
+        if (name == "DOWN") return SDL_SCANCODE_S;
+        if (name == "LEFT") return SDL_SCANCODE_A;
+        if (name == "RIGHT") return SDL_SCANCODE_D;
+        if (name == "A") return SDL_SCANCODE_K;
+        if (name == "B") return SDL_SCANCODE_J;
+        if (name == "START") return SDL_SCANCODE_I;
+        if (name == "SELECT") return SDL_SCANCODE_U;
+
+        return SDL_SCANCODE_UNKNOWN;
+    }
+
 int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen) {
     std::string error;
     emu::SystemPtr system = emu::createForFile(rom_path, error);
@@ -498,6 +565,43 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
     const double target_frame_ticks = static_cast<double>(performance_frequency) / refresh;
     double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
 
+    std::array<SDL_GameController*, 2> gamepads{};
+    const bool gamecontroller_ready =
+        SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
+
+    auto openGamepad = [&](int device_index) {
+        if (!gamecontroller_ready || !SDL_IsGameController(device_index)) {
+            return;
+        }
+
+        int slot = -1;
+        for (int i = 0; i < static_cast<int>(gamepads.size()); ++i) {
+            if (!gamepads[i]) {
+                slot = i;
+                break;
+            }
+        }
+
+        if (slot < 0) return;
+
+        gamepads[slot] = SDL_GameControllerOpen(device_index);
+        if (gamepads[slot]) {
+            const char* name = SDL_GameControllerName(gamepads[slot]);
+            std::printf("Player %d controller: %s\n",
+                    slot + 1, name ? name : "unknown");
+        }
+    };
+
+    if (gamecontroller_ready) {
+        SDL_GameControllerEventState(SDL_ENABLE);
+        for (int i = 0; i < SDL_NumJoysticks(); ++i) {
+            openGamepad(i);
+        }
+    } else {
+        std::fprintf(stderr, "Controller support unavailable: %s\n", SDL_GetError());
+    }
+
+
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -513,20 +617,74 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
                         is_fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
                     std::fprintf(stderr, "Could not toggle fullscreen: %s\n", SDL_GetError());
                 }
+            } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
+                // SDL provides a device index for controller-added events.
+                openGamepad(event.cdevice.which);
+            } else if (event.type == SDL_CONTROLLERDEVICEREMOVED) {
+                // Removal events provide the joystick instance ID.
+                for (SDL_GameController*& gamepad : gamepads) {
+                    if (!gamepad) continue;
+
+                    SDL_Joystick* joystick = SDL_GameControllerGetJoystick(gamepad);
+                    if (SDL_JoystickInstanceID(joystick) == event.cdevice.which) {
+                        SDL_GameControllerClose(gamepad);
+                        gamepad = nullptr;
+                        break;
+                    }
+                }
             }
         }
 
         const Uint8* keyboard = SDL_GetKeyboardState(nullptr);
-        uint32_t button_state = 0;
-        for (const emu::ButtonInfo& button : system->buttons()) {
-            if (!button.default_key) continue;
-            const SDL_Scancode key = SDL_GetScancodeFromName(button.default_key);
-            if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) button_state |= button.mask;
-        }
+        const std::string system_name = normalizedButtonName(system->name());
+        const bool is_pico8 = system_name == "PICO-8" || system_name == "PICO8";
 
-        system->setInput(0, button_state);
-        for (int port = 1; port < system->portCount(); ++port) {
-            system->setInput(port, 0);
+        for (int port = 0; port < system->portCount(); ++port) {
+            uint32_t button_state = 0;
+
+            for (const emu::ButtonInfo& button : system->buttons()) {
+                bool down = false;
+                const std::string button_name =
+                    normalizedButtonName(button.name);
+
+                // Player 1 uses the core's declared keyboard bindings.
+                if (port == 0 && button.default_key) {
+                    const SDL_Scancode key =
+                        SDL_GetScancodeFromName(button.default_key);
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
+                        down = true;
+                    }
+                }
+
+                // PICO-8's two action buttons have common keyboard aliases.
+                if (port == 0 && is_pico8) {
+                    if (button_name == "O") {
+                        down = down || keyboard[SDL_SCANCODE_Z] ||
+                               keyboard[SDL_SCANCODE_C];
+                    } else if (button_name == "X") {
+                        down = down || keyboard[SDL_SCANCODE_X] ||
+                               keyboard[SDL_SCANCODE_V];
+                    }
+                }
+
+                // Optional second-player keyboard layout for the NES.
+                if (port == 1 && system_name == "NES") {
+                    const SDL_Scancode key = nesPlayerTwoKey(button.name);
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
+                        down = true;
+                    }
+                }
+
+                // Controller slot 0 drives port 0; slot 1 drives port 1.
+                if (port < static_cast<int>(gamepads.size()) && gamepads[port] &&
+                    gamepadButtonDown(gamepads[port], button.name, is_pico8)) {
+                    down = true;
+                }
+
+                if (down) button_state |= button.mask;
+            }
+
+            system->setInput(port, button_state);
         }
 
         system->runFrame();
@@ -563,6 +721,9 @@ int runGenericGame(const std::string& rom_path, bool mute, bool start_fullscreen
         }
     }
 
+    for (SDL_GameController* gamepad : gamepads) {
+        if (gamepad) SDL_GameControllerClose(gamepad);
+    }
     if (audio) SDL_CloseAudioDevice(audio);
     if (texture) SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
@@ -578,9 +739,8 @@ std::string chooseRomFile() {
     OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter =
-        "Supported ROMs\0*.nes;*.ch8;*.c8\0"
-        "NES ROMs\0*.nes\0"
-        "CHIP-8 ROMs\0*.ch8;*.c8\0"
+        "Supported ROMs\0*.nes;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
+        "PSP games\0*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
         "All files\0*.*\0";
     dialog.lpstrFile = filename;
     dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
@@ -595,10 +755,30 @@ std::string chooseRomFile() {
 #endif
     return {};
 }
+
+bool isPspRom(const std::string& path) {
+    std::string extension = fs::path(path).extension().string();
+
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    return extension == ".iso" || extension == ".cso" ||
+           extension == ".pbp" || extension == ".chd" ||
+           extension == ".elf" || extension == ".prx";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     std::string rom_path;
+#ifdef _WIN32
+    std::string psp_core = "cores/ppsspp_libretro.dll";
+#elif __APPLE__
+    std::string psp_core = "cores/ppsspp_libretro.dylib";
+#else
+    std::string psp_core = "cores/ppsspp_libretro.so";
+#endif
+    std::string system_directory = "system";
     fs::path games_folder = "games";
     bool mute = false;
     bool fullscreen = false;
@@ -612,6 +792,16 @@ int main(int argc, char** argv) {
             mute = true;
         } else if (arg == "--fullscreen") {
             fullscreen = true;
+        } else if (arg == "--ppsspp-core" && i + 1 < argc) {
+            psp_core = argv[++i];
+        } else if (arg == "--ppsspp-core") {
+            std::fprintf(stderr, "--ppsspp-core requires a path to the PPSSPP Libretro core\n");
+            return EXIT_FAILURE;
+        } else if (arg == "--system-dir" && i + 1 < argc) {
+            system_directory = argv[++i];
+        } else if (arg == "--system-dir") {
+            std::fprintf(stderr, "--system-dir requires a path\n");
+            return EXIT_FAILURE;
         } else if ((arg == "--games-dir" || arg == "--rom") && i + 1 < argc) {
             const std::string value = argv[++i];
             if (arg == "--games-dir") games_folder = value;
@@ -639,6 +829,13 @@ int main(int argc, char** argv) {
             SDL_Quit();
             return EXIT_SUCCESS;
         }
+    }
+
+    if (isPspRom(rom_path)) {
+        const int result = emu::psp::runPspGame(
+            psp_core, rom_path, system_directory, fullscreen, mute);
+        SDL_Quit();
+        return result;
     }
 
     return runGenericGame(rom_path, mute, fullscreen);
