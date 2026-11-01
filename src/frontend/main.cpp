@@ -91,7 +91,10 @@ bool saveStateToSlot(const emu::System& system,
                      const std::string& rom_path,
                      int slot) {
     std::vector<uint8_t> state;
-    if (!system.saveState(state)) return false;
+    if (slot < 1 || slot > 9 || !system.saveState(state) || state.empty()) {
+        return false;
+    }
+
     fs::path path = fs::path(rom_path);
     path.replace_extension(
         ".slot" + std::to_string(slot) + ".state");
@@ -100,19 +103,30 @@ bool saveStateToSlot(const emu::System& system,
 
     file.write(reinterpret_cast<const char*>(state.data()),
                static_cast<std::streamsize>(state.size()));
-    return file.good();
+    return file.good() &&
+           static_cast<size_t>(file.tellp()) == state.size();
 }
 
 bool loadStateFromSlot(emu::System& system,
                        const std::string& rom_path,
                        int slot) {
+    if (slot < 1 || slot > 9) return false;
+
     fs::path path = fs::path(rom_path);
     path.replace_extension(
         ".slot" + std::to_string(slot) + ".state");
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
-    std::vector<uint8_t> state(
-        std::istreambuf_iterator<char>(file), {});
+
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size <= 0) return false;
+    file.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> state(static_cast<size_t>(size));
+    file.read(reinterpret_cast<char*>(state.data()), size);
+    if (!file || file.gcount() != size) return false;
+
     return system.loadState(state);
 }
 
@@ -159,6 +173,7 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
         }
 
         if (extension == ".ch8" || extension == ".c8" || extension == ".nes" ||
+            extension == ".gb" ||
             extension == ".iso" || extension == ".cso" || extension == ".pbp" ||
             extension == ".chd" || extension == ".elf" || extension == ".prx" ||
             extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
@@ -983,7 +998,7 @@ SDL_Scancode nesPlayerTwoKey(const char* button_name) {
 int runGenericGame(const std::string& rom_path,
                    bool mute,
                    bool start_fullscreen,
-                   const emu::frontend::Settings& settings) {
+                   emu::frontend::Settings& settings) {
     std::string error;
     emu::SystemPtr system = emu::createForFile(rom_path, error);
     
@@ -1395,6 +1410,9 @@ int runGenericGame(const std::string& rom_path,
         SDL_GL_DeleteContext(gl_context);
     }
     SDL_DestroyWindow(window);
+    if (!emu::frontend::saveSettings(settings)) {
+        std::fprintf(stderr, "Could not save settings.ini\n");
+    }
     SDL_Quit();
     return EXIT_SUCCESS;
 }
@@ -1406,7 +1424,7 @@ std::string chooseRomFile() {
     OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter =
-        "Supported games\0*.nes;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
+        "Supported games\0*.nes;*.gb;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "PSP games\0*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
         "PS2 games\0*.iso;*.cso;*.chd;*.elf;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "All files\0*.*\0";

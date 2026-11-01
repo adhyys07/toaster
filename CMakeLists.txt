@@ -28,8 +28,14 @@ add_library(emu_core
     systems/nes/cartridge.cpp
     systems/chip8/chip8.cpp
     systems/chip8/chip8_vm.cpp
-    systems/gb/game_boy_system.cpp)
-target_include_directories(emu_core PUBLIC src systems/nes systems/chip8)
+    systems/gb/game_boy_system.cpp
+    systems/gb/timer.cpp
+    systems/gb/cartridge.cpp
+    systems/gb/memory.cpp
+    systems/gb/cpu.cpp
+    systems/gb/ppu.cpp
+    systems/gb/apu.cpp)
+target_include_directories(emu_core PUBLIC src systems/nes systems/chip8 systems/gb)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 set(EMU_TEST_ROMS "${CMAKE_CURRENT_BINARY_DIR}/roms")
