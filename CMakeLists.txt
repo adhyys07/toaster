@@ -59,10 +59,21 @@ add_test(NAME bindings COMMAND binding_tests)
 set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 find_package(SDL2 REQUIRED)
+add_executable(settings_tests
+    tests/test_settings.cpp
+    src/frontend/settings.cpp)
+target_include_directories(settings_tests PRIVATE
+    src/frontend systems/psp ${SDL2_INCLUDE_DIRS})
+target_link_libraries(settings_tests PRIVATE ${SDL2_LIBRARIES})
+add_test(NAME settings COMMAND settings_tests)
+
 add_executable(emu
     src/frontend/main.cpp
-    src/frontend/gl_fsr_upscaler.cpp
     src/frontend/settings.cpp
+    src/frontend/gl_fsr_upscaler.cpp
+    src/frontend/game_metadata.cpp
+    src/frontend/save_state_manager.cpp
+    src/frontend/crash_logger.cpp
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp

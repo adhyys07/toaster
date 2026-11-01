@@ -20,6 +20,7 @@
 #include <array>
 #include "settings.h"
 #include "ps2_system.h"
+#include "crash_logger.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -42,6 +43,7 @@ void printUsage(const char* exe) {
         "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
+        "  --verbose           enable diagnostic logging\n"
         "  --help\n"
         "\n"
         "Without a ROM argument, open the game library. O opens a game file.\n"
@@ -1728,6 +1730,12 @@ bool installCoreFiles(const std::string& server_url) {
 
     std::string base_url = server_url;
     while (!base_url.empty() && base_url.back() == '/') base_url.pop_back();
+    if (base_url.rfind("https://", 0) != 0) {
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR, "Core installation",
+            "The core server URL must use HTTPS.", nullptr);
+        return false;
+    }
 
     const std::vector<std::string> files = {
         "swanstation_libretro.dll",
@@ -1738,6 +1746,8 @@ bool installCoreFiles(const std::string& server_url) {
     for (const std::string& filename : files) {
         const std::string url = base_url + "/" + filename;
         const fs::path destination = core_directory / filename;
+        const fs::path temporary = destination.string() + ".download";
+        std::error_code cleanup_error;
         using UrlDownloadToFileFn = HRESULT (*)(
             void*, const char*, const char*, unsigned long, void*);
         HMODULE urlmon = LoadLibraryA("urlmon.dll");
@@ -1746,13 +1756,26 @@ bool installCoreFiles(const std::string& server_url) {
                 GetProcAddress(urlmon, "URLDownloadToFileA"))
             : nullptr;
         const HRESULT result = download
-            ? download(nullptr, url.c_str(), destination.string().c_str(), 0, nullptr)
+            ? download(nullptr, url.c_str(), temporary.string().c_str(), 0, nullptr)
             : E_FAIL;
         if (urlmon) FreeLibrary(urlmon);
-        if (FAILED(result)) {
+        if (FAILED(result) || !fs::is_regular_file(temporary)) {
+            fs::remove(temporary, cleanup_error);
             SDL_ShowSimpleMessageBox(
                 SDL_MESSAGEBOX_ERROR, "Core installation",
                 ("Could not download:\n" + url).c_str(), nullptr);
+            return false;
+        }
+        std::error_code replace_error;
+        fs::remove(destination, replace_error);
+        replace_error.clear();
+        fs::rename(temporary, destination, replace_error);
+        if (replace_error) {
+            fs::remove(temporary, cleanup_error);
+            SDL_ShowSimpleMessageBox(
+                SDL_MESSAGEBOX_ERROR, "Core installation",
+                ("Could not install:\n" + destination.string()).c_str(),
+                nullptr);
             return false;
         }
     }
@@ -1850,6 +1873,7 @@ int main(int argc, char** argv) {
     fs::path games_folder = "games";
     bool mute = settings.mute;
     bool fullscreen = settings.fullscreen;
+    bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1858,6 +1882,8 @@ int main(int argc, char** argv) {
             return EXIT_SUCCESS;
         } else if (arg == "--mute") {
             mute = true;
+        } else if (arg == "--verbose") {
+            verbose = true;
         } else if (arg == "--fullscreen") {
             fullscreen = true;
         } else if (arg == "--ppsspp-core" && i + 1 < argc) {
@@ -1936,7 +1962,19 @@ int main(int argc, char** argv) {
         }
     }
 
+    emu::frontend::CrashLogger logger("logs/toaster.log");
+    const auto logLaunch = [&](const char* system,
+                               const std::string& core,
+                               const std::string& game) {
+        logger.writeGameStart(core, game, system);
+        if (verbose) {
+            std::fprintf(stderr, "[verbose] system=%s core=%s game=%s\n",
+                         system, core.c_str(), game.c_str());
+        }
+    };
+
     if (!ps1_game_path.empty()) {
+        logLaunch("PS1", ps1_core, ps1_game_path);
         const int result = emu::ps1::runPs1Game(
             ps1_core, ps1_game_path, system_directory, fullscreen, mute,
             settings);
@@ -1945,6 +1983,7 @@ int main(int argc, char** argv) {
     }
 
     if (!ps2_game_path.empty()) {
+        logLaunch("PS2", ps2_core, ps2_game_path);
         const int result = emu::ps2::runPs2Game(
             ps2_core, ps2_game_path, system_directory, fullscreen, mute,
             settings);
@@ -1958,18 +1997,21 @@ int main(int argc, char** argv) {
         return EXIT_SUCCESS;
     }
     if (selected_system == SelectedSystem::PS2) {
+        logLaunch("PS2", ps2_core, rom_path);
         const int result = emu::ps2::runPs2Game(
             ps2_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();
         return result;
     }
     if (selected_system == SelectedSystem::PS1) {
+        logLaunch("PS1", ps1_core, rom_path);
         const int result = emu::ps1::runPs1Game(
             ps1_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();
         return result;
     }
     if (selected_system == SelectedSystem::PSP) {
+        logLaunch("PSP", psp_core, rom_path);
         const int result = emu::psp::runPspGame(
             psp_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();

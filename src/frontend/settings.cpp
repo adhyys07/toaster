@@ -1,9 +1,13 @@
 #include "settings.h"
-
+#include <filesystem>
 #include <algorithm>
 #include <fstream>
 #include <SDL.h>
+#include <SDL_opengl.h>
+#include <exception>
 #include <string>
+#include <utility>
+#include "libretro.h"
 
 namespace emu::frontend {
 namespace {
@@ -38,7 +42,236 @@ const char* scalingValue(ScalingMode mode) {
     }
 }
 
+bool validControllerButton(int button) {
+    return button >= 0 && button < SDL_CONTROLLER_BUTTON_MAX;
+}
+
+bool parseControllerButton(const std::string& value, int& button) {
+    try {
+        const int parsed = std::stoi(value);
+        if (!validControllerButton(parsed)) return false;
+        button = parsed;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+void writeControllerButton(std::ofstream& file,
+                           const char* name,
+                           int button) {
+    file << name << '=' << button << '\n';
+}
+
 } // namespace
+
+GameSettings loadGameSettings(const std::string& game_path) {
+    GameSettings settings;
+    std::ifstream file(game_path + ".ini");
+    if (!file) return settings;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto equals = line.find('=');
+        if (equals == std::string::npos) continue;
+
+        const std::string key = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+
+        try {
+            if (key == "scale") {
+                settings.scale = std::clamp(std::stoi(value), 1, 8);
+            } else if (key == "integer_scale") {
+                settings.integer_scale = value == "true";
+            } else if (key == "bilinear_filter") {
+                settings.bilinear_filter = value == "true";
+            } else if (key == "vsync") {
+                settings.vsync = value == "true";
+            } else if (key == "show_fps") {
+                settings.show_fps = value == "true";
+            } else if (key == "mute_audio") {
+                settings.mute_audio = value == "true";
+            } else if (key == "fast_forward_speed") {
+                settings.fast_forward_speed =
+                    std::clamp(std::stoi(value), 1, 8);
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+
+    return settings;
+}
+
+bool saveGameSettings(const std::string& game_path,
+                      const GameSettings& settings) {
+    std::ofstream file(game_path + ".ini", std::ios::trunc);
+    if (!file) return false;
+
+    file << "scale=" << std::clamp(settings.scale, 1, 8) << '\n'
+         << "integer_scale=" << (settings.integer_scale ? "true" : "false") << '\n'
+         << "bilinear_filter=" << (settings.bilinear_filter ? "true" : "false") << '\n'
+         << "vsync=" << (settings.vsync ? "true" : "false") << '\n'
+         << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
+         << "mute_audio=" << (settings.mute_audio ? "true" : "false") << '\n'
+         << "fast_forward_speed="
+         << std::clamp(settings.fast_forward_speed, 1, 8) << '\n';
+
+    return file.good();
+}
+
+bool ControllerProfileManager::validate(
+    const ControllerProfile& profile,
+    std::string& error) const {
+    if (profile.name.empty()) {
+        error = "Controller profile name cannot be empty.";
+        return false;
+    }
+
+    const int buttons[] = {
+        profile.cross, profile.circle, profile.square, profile.triangle,
+        profile.start, profile.back, profile.l1, profile.r1,
+        profile.l2, profile.r2
+    };
+    for (const int button : buttons) {
+        if (!validControllerButton(button)) {
+            error = "Controller profile contains an invalid button.";
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ControllerProfileManager::save(
+    const ControllerProfile& profile,
+    const std::filesystem::path& file_path,
+    std::string& error) {
+    if (!validate(profile, error)) return false;
+
+    std::error_code filesystem_error;
+    const auto parent = file_path.parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, filesystem_error);
+        if (filesystem_error) {
+            error = "Could not create controller-profile directory: " +
+                    filesystem_error.message();
+            return false;
+        }
+    }
+
+    std::ofstream file(file_path, std::ios::trunc);
+    if (!file) {
+        error = "Could not open controller-profile file.";
+        return false;
+    }
+
+    file << "name=" << profile.name << '\n';
+    writeControllerButton(file, "cross", profile.cross);
+    writeControllerButton(file, "circle", profile.circle);
+    writeControllerButton(file, "square", profile.square);
+    writeControllerButton(file, "triangle", profile.triangle);
+    writeControllerButton(file, "start", profile.start);
+    writeControllerButton(file, "back", profile.back);
+    writeControllerButton(file, "l1", profile.l1);
+    writeControllerButton(file, "r1", profile.r1);
+    writeControllerButton(file, "l2", profile.l2);
+    writeControllerButton(file, "r2", profile.r2);
+
+    if (!file.good()) {
+        error = "Could not write controller-profile file.";
+        return false;
+    }
+    return true;
+}
+
+bool ControllerProfileManager::load(
+    const std::filesystem::path& file_path,
+    ControllerProfile& profile,
+    std::string& error) {
+    std::ifstream file(file_path);
+    if (!file) {
+        error = "Could not open controller-profile file.";
+        return false;
+    }
+
+    ControllerProfile loaded;
+    std::string line;
+    while (std::getline(file, line)) {
+        const auto equals = line.find('=');
+        if (equals == std::string::npos) continue;
+
+        const std::string key = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+        if (key == "name") {
+            loaded.name = value;
+        } else if (key == "cross") {
+            parseControllerButton(value, loaded.cross);
+        } else if (key == "circle") {
+            parseControllerButton(value, loaded.circle);
+        } else if (key == "square") {
+            parseControllerButton(value, loaded.square);
+        } else if (key == "triangle") {
+            parseControllerButton(value, loaded.triangle);
+        } else if (key == "start") {
+            parseControllerButton(value, loaded.start);
+        } else if (key == "back") {
+            parseControllerButton(value, loaded.back);
+        } else if (key == "l1") {
+            parseControllerButton(value, loaded.l1);
+        } else if (key == "r1") {
+            parseControllerButton(value, loaded.r1);
+        } else if (key == "l2") {
+            parseControllerButton(value, loaded.l2);
+        } else if (key == "r2") {
+            parseControllerButton(value, loaded.r2);
+        }
+    }
+
+    if (!file.good() && !file.eof()) {
+        error = "Could not read controller-profile file.";
+        return false;
+    }
+    if (!validate(loaded, error)) return false;
+
+    profile = loaded;
+    return true;
+}
+
+bool configureVsync(const VideoSettings& settings,
+                    std::string& error) {
+    if (SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0) != 0) {
+        error = "Could not configure VSync: ";
+        error += SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+void applyControllerProfile(
+    const ControllerProfile& profile,
+    const SDL_GameController* controller,
+    uint16_t& joypad_state) {
+    if (!controller) return;
+
+    const auto pressed = [controller](int button) {
+        return SDL_GameControllerGetButton(
+            controller,
+            static_cast<SDL_GameControllerButton>(button)) != 0;
+    };
+    const auto set = [&joypad_state](unsigned id, bool value) {
+        if (value) joypad_state = static_cast<uint16_t>(
+            joypad_state | (1u << id));
+    };
+
+    set(RETRO_DEVICE_ID_JOYPAD_B, pressed(profile.cross));
+    set(RETRO_DEVICE_ID_JOYPAD_A, pressed(profile.circle));
+    set(RETRO_DEVICE_ID_JOYPAD_Y, pressed(profile.square));
+    set(RETRO_DEVICE_ID_JOYPAD_X, pressed(profile.triangle));
+    set(RETRO_DEVICE_ID_JOYPAD_START, pressed(profile.start));
+    set(RETRO_DEVICE_ID_JOYPAD_SELECT, pressed(profile.back));
+    set(RETRO_DEVICE_ID_JOYPAD_L, pressed(profile.l1));
+    set(RETRO_DEVICE_ID_JOYPAD_R, pressed(profile.r1));
+}
 
 Settings loadSettings() {
     Settings settings;

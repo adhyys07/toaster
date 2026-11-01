@@ -37,3 +37,6 @@
 *.sav
 *.srm
 /settings.ini
+
+/logs/
+*.state

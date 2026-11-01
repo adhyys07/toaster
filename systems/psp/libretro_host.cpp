@@ -18,6 +18,40 @@
 #include <string>
 #include <vector>
 
+namespace emu::frontend {
+
+void applyControllerProfile(
+    const ControllerProfile& profile,
+    const SDL_GameController* controller,
+    uint16_t& joypad_state) {
+    if (!controller) return;
+
+    const auto pressed = [controller](int button) {
+        return SDL_GameControllerGetButton(
+            controller,
+            static_cast<SDL_GameControllerButton>(button)) != 0;
+    };
+
+    if (pressed(profile.cross))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_B;
+    if (pressed(profile.circle))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_A;
+    if (pressed(profile.square))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_Y;
+    if (pressed(profile.triangle))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_X;
+    if (pressed(profile.start))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_START;
+    if (pressed(profile.back))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_SELECT;
+    if (pressed(profile.l1))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_L;
+    if (pressed(profile.r1))
+        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_R;
+}
+
+} // namespace emu::frontend
+
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER 0x8D40
 #define GL_READ_FRAMEBUFFER 0x8CA8
@@ -539,6 +573,18 @@ private:
         if (SDL_GL_MakeCurrent(window_, gl_context_) != 0) {
             error = std::string("could not activate OpenGL context: ") + SDL_GetError();
             return false;
+        }
+        if (needs_modern_gl) {
+            const char* version = reinterpret_cast<const char*>(
+                glGetString(GL_VERSION));
+            int major = 0;
+            int minor = 0;
+            if (!version || std::sscanf(version, "%d.%d", &major, &minor) != 2 ||
+                major < 4 || (major == 4 && minor < 3)) {
+                error = "PS2 requires OpenGL 4.3 or newer; detected ";
+                error += version ? version : "unknown";
+                return false;
+            }
         }
         SDL_GL_SetSwapInterval(1);
         SDL_GL_GetDrawableSize(window_, &drawable_width_, &drawable_height_);

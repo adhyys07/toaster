@@ -2,6 +2,8 @@
 #include <array>
 #include <string>
 #include <SDL.h>
+#include <cstdint>
+#include <filesystem>
 
 namespace emu::frontend {
 
@@ -59,12 +61,72 @@ struct Settings {
     };
 };
 
+struct GameSettings {
+    int scale = 2;
+    bool integer_scale = true;
+    bool bilinear_filter = false;
+    bool vsync = true;
+    bool show_fps = false;
+    bool mute_audio = false;
+    int fast_forward_speed = 2;
+};
+
+struct VideoSettings {
+    bool vsync = true;
+    bool integer_scale = true;
+    bool bilinear_filter = false;
+    bool fullscreen = false;
+    bool show_fps = false;
+    int scale = 2;
+};
+
+struct ControllerProfile {
+    std::string name = "Default";
+
+    int cross = SDL_CONTROLLER_BUTTON_A;
+    int circle = SDL_CONTROLLER_BUTTON_B;
+    int square = SDL_CONTROLLER_BUTTON_X;
+    int triangle = SDL_CONTROLLER_BUTTON_Y;
+    int start = SDL_CONTROLLER_BUTTON_START;
+    int back = SDL_CONTROLLER_BUTTON_BACK;
+    int l1 = SDL_CONTROLLER_BUTTON_LEFTSHOULDER;
+    int r1 = SDL_CONTROLLER_BUTTON_RIGHTSHOULDER;
+    int l2 = SDL_CONTROLLER_BUTTON_LEFTSTICK;
+    int r2 = SDL_CONTROLLER_BUTTON_RIGHTSTICK;
+};
+
+class ControllerProfileManager {
+public:
+    bool save(const ControllerProfile& profile,
+              const std::filesystem::path& file,
+              std::string& error);
+
+    bool load(const std::filesystem::path& file,
+              ControllerProfile& profile,
+              std::string& error);
+
+private:
+    bool validate(const ControllerProfile& profile,
+                  std::string& error) const;
+};
+
+void applyControllerProfile(
+    const ControllerProfile& profile,
+    const SDL_GameController* controller,
+    uint16_t& joypad_state);
+
 Settings loadSettings();
+GameSettings loadGameSettings(const std::string& game_path);
+bool saveGameSettings(const std::string& game_path,
+                      const GameSettings& settings);
 bool saveSettings(const Settings& settings);
 const char* upscalerName(Upscaler mode);
 void cycleUpscaler(Settings& settings);
 const char* scalingName(ScalingMode mode);
 void cycleScaling(Settings& settings);
 void changeVolume(Settings& settings, int delta);
+
+bool configureVsync(const VideoSettings& settings,
+                    std::string& error);
 
 } // namespace emu::frontend

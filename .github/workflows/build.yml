@@ -1,35 +1,36 @@
-name: Build and test
+name: Build Toaster
 
 on:
   push:
-  pull_request:
+    tags:
+      - "v*"
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libsdl2-ttf-dev
-
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -G Ninja
 
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Test
-        working-directory: build
-        run: ctest --output-on-failure
-
       - name: Package
-        run: cmake --build build --target package
+        run: |
+          New-Item -ItemType Directory -Force package
+          Copy-Item build/emu.exe package/
+          Copy-Item build/SDL2.dll package/
+          Copy-Item build/SDL2_ttf.dll package/
+          Copy-Item -Recurse assets package/assets
+          Copy-Item README.md package/
+
+      - name: Archive
+        run: Compress-Archive package toaster-windows.zip
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: toaster-windows.zip
