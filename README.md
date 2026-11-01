@@ -115,6 +115,8 @@ build/emu.exe \
   --core-server "https://your-domain.example/cores"
 ```
 
+When you install the full version of toaster you already get the server configured you just need to hit Install Cores in emulator and it will install and compile all the cores for all the emulators that needs some additional cores like: PS consoles
+
 Only distribute files you are legally allowed to redistribute. Never place
 BIOS files or games on the core server.
 
@@ -134,7 +136,7 @@ build/emu.exe --games-dir "/path/to/games"
 
 The library supports common NES, Game Boy, PSP, PS1, and PS2 image formats.
 
-### Optional Python library service
+### Optional Python library service (refer to that folder for how to fetch an api key and get the game db data)
 
 The optional Python service scans ROM folders into SQLite and provides shared
 metadata, favorites, recently played games, play counts, tags, statistics, and

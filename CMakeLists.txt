@@ -141,8 +141,6 @@ elseif(TARGET SDL2_ttf::SDL2_ttf-static)
     target_link_libraries(emu PRIVATE SDL2_ttf::SDL2_ttf-static)
 else()
     find_path(SDL2_TTF_INCLUDE_DIR SDL_ttf.h PATH_SUFFIXES SDL2)
-    # Prefer MinGW's DLL import library. The static archive also needs
-    # FreeType and HarfBuzz to be linked explicitly.
     find_library(SDL2_TTF_LINK_LIBRARY NAMES SDL2_ttf.dll SDL2_ttf)
     if(NOT SDL2_TTF_INCLUDE_DIR OR NOT SDL2_TTF_LINK_LIBRARY)
         message(FATAL_ERROR "SDL2_ttf was found, but its headers or library are missing")
