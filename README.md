@@ -134,6 +134,26 @@ build/emu.exe --games-dir "/path/to/games"
 
 The library supports common NES, Game Boy, PSP, PS1, and PS2 image formats.
 
+### Optional Python library service
+
+The local Python service can scan ROM folders into SQLite and provide shared
+metadata, favorites, and recently played games:
+
+```bash
+cd services/library_server
+python app.py --database toaster-library.sqlite
+```
+
+Then start Toaster with:
+
+```bash
+build/emu.exe --games-dir "/path/to/games" \
+  --library-server http://127.0.0.1:8765
+```
+
+Without `--library-server`, Toaster continues using its built-in offline
+library scanner.
+
 ## Build on Windows
 
 Install CMake, Ninja, MinGW-w64, Python 3, SDL2, and SDL2_ttf. Then run:

@@ -80,6 +80,8 @@ add_executable(emu
     src/frontend/game_metadata.cpp
     src/frontend/save_state_manager.cpp
     src/frontend/crash_logger.cpp
+    src/frontend/library_client.cpp
+    src/frontend/game_library.cpp
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
@@ -118,6 +120,11 @@ if(WIN32)
         message(FATAL_ERROR "Could not find the Windows common-dialog library (comdlg32)")
     endif()
     target_link_libraries(emu PRIVATE "${COMDLG32_LIBRARY}")
+    find_library(WS2_32_LIBRARY NAMES ws2_32)
+    if(NOT WS2_32_LIBRARY)
+        message(FATAL_ERROR "Could not find the Windows sockets library (ws2_32)")
+    endif()
+    target_link_libraries(emu PRIVATE "${WS2_32_LIBRARY}")
 else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(emu PRIVATE OpenGL::GL ${CMAKE_DL_LIBS})

@@ -10,6 +10,7 @@
 #include <vector>
 #include <string>
 #include <set>
+#include <memory>
 #include <algorithm>
 #include <cmath>
 #include <SDL_ttf.h>
@@ -22,6 +23,7 @@
 #include "ps2_system.h"
 #include "crash_logger.h"
 #include "core/core_manager.h"
+#include "library_client.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -41,6 +43,7 @@ void printUsage(const char* exe) {
         "  --ps2 PATH          launch a PS2 image directly\n"
         "  --ps2-core PATH     path to the LRPS2 Libretro core\n"
         "  --core-server URL   HTTPS base URL for core downloads\n"
+        "  --library-server URL local Python library service URL\n"
         "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
@@ -62,6 +65,8 @@ struct GameEntry
     std::string year = "Unknown";
     std::string genre = "Unknown";
     std::string description = "No description provided.";
+    std::string artwork;
+    std::string tags;
     bool favorite = false;
 };
 
@@ -580,8 +585,36 @@ bool installCoreFiles(const std::string& server_url);
 std::string showGameMenu(const fs::path& folder,
                          emu::frontend::Settings& settings,
                          const std::string& system_directory,
-                         const std::string& core_server_url) {
+                         const std::string& core_server_url,
+                         const std::string& library_server_url) {
     auto games = scanGames(folder);
+    std::unique_ptr<emu::frontend::LibraryClient> library_client;
+    emu::frontend::LibraryStatistics library_statistics;
+    if (!library_server_url.empty()) {
+        library_client = std::make_unique<emu::frontend::LibraryClient>(
+            library_server_url);
+        std::string library_error;
+        if (library_client->scan(folder.string(), library_error)) {
+            std::vector<emu::frontend::RemoteGame> remote_games;
+            if (library_client->listGames(remote_games, library_error)) {
+                games.clear();
+                for (const auto& remote : remote_games) {
+                    GameEntry game;
+                    game.path = remote.path;
+                    game.title = remote.title;
+                    game.favorite = remote.favorite;
+                    game.tags = remote.tags;
+                    game.tags = remote.tags;
+                    games.push_back(std::move(game));
+                }
+                library_client->getStatistics(library_statistics, library_error);
+            }
+        } else {
+            std::fprintf(stderr, "Library service unavailable: %s\n",
+                         library_error.c_str());
+            library_client.reset();
+        }
+    }
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
         return {};
@@ -631,6 +664,22 @@ std::string showGameMenu(const fs::path& folder,
     std::string result;
     std::string search;
     bool search_active = false;
+    const auto markPlayed = [&](const GameEntry& game) {
+        if (!library_client) return;
+        std::vector<emu::frontend::RemoteGame> remote_games;
+        std::string library_error;
+        if (!library_client->listGames(remote_games, library_error)) {
+            std::fprintf(stderr, "Could not update recent games: %s\n",
+                         library_error.c_str());
+            return;
+        }
+        for (const auto& remote : remote_games) {
+            if (gamePathKey(fs::path(remote.path)) == gamePathKey(game.path)) {
+                library_client->markPlayed(remote.id, library_error);
+                return;
+            }
+        }
+    };
     while (running) {
         if (redraw) {
             const std::vector<GameEntry> visible_games =
@@ -678,6 +727,12 @@ std::string showGameMenu(const fs::path& folder,
             const std::string count = std::to_string(visible_games.size()) +
                 (visible_games.size() == 1 ? " game" : " games");
             drawMenuText(menu_renderer, font, count, 340, 103, muted);
+            if (library_client) {
+                drawMenuText(menu_renderer, font,
+                             "Total " + std::to_string(library_statistics.total) +
+                                 "  Plays " + std::to_string(library_statistics.plays),
+                             36, 560, muted);
+            }
             drawMenuText(menu_renderer, font,
                          search_active ? "Search: " + search
                                        : "Press / to search",
@@ -732,6 +787,14 @@ std::string showGameMenu(const fs::path& folder,
                              500, 240, white);
                 drawMenuText(menu_renderer, font, "Genre      " + game.genre,
                              500, 276, white, 450);
+                drawMenuText(menu_renderer, font,
+                             "Artwork    " +
+                                 (game.artwork.empty() ? "None" : game.artwork),
+                             500, 300, muted, 450);
+                drawMenuText(menu_renderer, font,
+                             "Tags       " +
+                                 (game.tags.empty() ? "None" : game.tags),
+                             500, 330, muted, 450);
 
                 SDL_Rect separator{500, 316, 450, 1};
                 SDL_SetRenderDrawColor(menu_renderer,
@@ -811,7 +874,18 @@ std::string showGameMenu(const fs::path& folder,
                                 break;
                             }
                         }
-                        if (!saveFavorites(games)) {
+                        std::string library_error;
+                        if (library_client) {
+                            std::vector<emu::frontend::RemoteGame> remote_games;
+                            if (!library_client->listGames(remote_games, library_error)) {
+                                std::fprintf(stderr, "Could not refresh library: %s\n",
+                                             library_error.c_str());
+                            } else if (selected < remote_games.size()) {
+                                library_client->setFavorite(
+                                    remote_games[selected].id,
+                                    games[selected].favorite, library_error);
+                            }
+                        } else if (!saveFavorites(games)) {
                             std::fprintf(stderr,
                                          "Could not save favorites\n");
                         }
@@ -827,7 +901,25 @@ std::string showGameMenu(const fs::path& folder,
                     redraw = true;
                     break;
                 case SDLK_r:
-                    games = scanGames(folder);
+                    if (library_client) {
+                        std::string library_error;
+                        library_client->scan(folder.string(), library_error);
+                        std::vector<emu::frontend::RemoteGame> remote_games;
+                        if (library_client->listGames(remote_games, library_error)) {
+                            games.clear();
+                            for (const auto& remote : remote_games) {
+                                GameEntry game;
+                                game.path = remote.path;
+                                game.title = remote.title;
+                                game.favorite = remote.favorite;
+                                game.artwork = remote.artwork;
+                                game.tags = remote.tags;
+                                games.push_back(std::move(game));
+                            }
+                        }
+                    } else {
+                        games = scanGames(folder);
+                    }
                     selected = 0;
                     first_visible = 0;
                     redraw = true;
@@ -851,6 +943,7 @@ std::string showGameMenu(const fs::path& folder,
                 case SDLK_RETURN:
                 case SDLK_KP_ENTER:
                     if (!visible_games.empty()) {
+                        markPlayed(visible_games[selected]);
                         result = visible_games[selected].path.string();
                         running = false;
                     }
@@ -903,6 +996,7 @@ std::string showGameMenu(const fs::path& folder,
 
                 if (pointInside(launch_button, event.button.x, event.button.y)) {
                     if (!visible_games.empty()) {
+                        markPlayed(visible_games[selected]);
                         result = visible_games[selected].path.string();
                         running = false;
                     }
@@ -919,7 +1013,23 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(rescan_button, event.button.x, event.button.y)) {
-                    games = scanGames(folder);
+                    if (library_client) {
+                        std::string library_error;
+                        library_client->scan(folder.string(), library_error);
+                        std::vector<emu::frontend::RemoteGame> remote_games;
+                        if (library_client->listGames(remote_games, library_error)) {
+                            games.clear();
+                            for (const auto& remote : remote_games) {
+                                GameEntry game;
+                                game.path = remote.path;
+                                game.title = remote.title;
+                                game.favorite = remote.favorite;
+                                games.push_back(std::move(game));
+                            }
+                        }
+                    } else {
+                        games = scanGames(folder);
+                    }
                     selected = 0;
                     first_visible = 0;
                     redraw = true;
@@ -936,6 +1046,7 @@ std::string showGameMenu(const fs::path& folder,
                         selected = index;
                         redraw = true;
                         if (event.button.clicks >= 2) {
+                            markPlayed(visible_games[index]);
                             result = visible_games[index].path.string();
                             running = false;
                         }
@@ -1871,6 +1982,7 @@ int main(int argc, char** argv) {
     std::string system_directory = "system";
     std::string core_server_url =
         "https://example.com/toaster/cores";
+    std::string library_server_url;
     fs::path games_folder = "games";
     bool mute = settings.mute;
     bool fullscreen = settings.fullscreen;
@@ -1906,6 +2018,11 @@ int main(int argc, char** argv) {
             core_server_url = argv[++i];
         } else if (arg == "--core-server") {
             std::fprintf(stderr, "--core-server requires an HTTPS base URL\n");
+            return EXIT_FAILURE;
+        } else if (arg == "--library-server" && i + 1 < argc) {
+            library_server_url = argv[++i];
+        } else if (arg == "--library-server") {
+            std::fprintf(stderr, "--library-server requires an HTTP URL\n");
             return EXIT_FAILURE;
         } else if (arg == "--ps2" && i + 1 < argc) {
             ps2_game_path = argv[++i];
@@ -1978,7 +2095,8 @@ int main(int argc, char** argv) {
 
     if (rom_path.empty() && ps1_game_path.empty() && ps2_game_path.empty()) {
         rom_path = showGameMenu(
-            games_folder, settings, system_directory, core_server_url);
+            games_folder, settings, system_directory, core_server_url,
+            library_server_url);
         mute = settings.mute;
         fullscreen = settings.fullscreen;
         if (rom_path.empty()) {
