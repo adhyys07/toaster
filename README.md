@@ -136,12 +136,14 @@ The library supports common NES, Game Boy, PSP, PS1, and PS2 image formats.
 
 ### Optional Python library service
 
-The local Python service can scan ROM folders into SQLite and provide shared
-metadata, favorites, and recently played games:
+The optional Python service scans ROM folders into SQLite and provides shared
+metadata, favorites, recently played games, play counts, tags, statistics, and
+metadata-only catalog search.
 
 ```bash
 cd services/library_server
-python app.py --database toaster-library.sqlite
+python -m pip install -r requirements.txt
+python -m uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
 Then start Toaster with:
@@ -153,6 +155,38 @@ build/emu.exe --games-dir "/path/to/games" \
 
 Without `--library-server`, Toaster continues using its built-in offline
 library scanner.
+
+The service provides these endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /scan` | Scan a local games folder |
+| `GET /games` | List locally available games |
+| `GET /games?filter=favorites` | List favorite games |
+| `GET /games?filter=recent` | List recently played games |
+| `POST /games/{id}/favorite` | Change a favorite flag |
+| `POST /games/{id}/played` | Record a launch and increment play count |
+| `PUT /games/{id}/tags` | Store user tags |
+| `GET /statistics` | Return library totals and system counts |
+| `GET /catalog/search?q=...` | Search metadata without downloading games |
+
+The SQLite path defaults to `toaster-library.sqlite`. Set
+`TOASTER_DATABASE` to use another location:
+
+```powershell
+$env:TOASTER_DATABASE = "D:\toaster\data\library.sqlite"
+python -m uvicorn app:app --host 127.0.0.1 --port 8765
+```
+
+Catalog search uses TheGamesDB and requires an API key supplied through the
+environment:
+
+```powershell
+$env:THEGAMESDB_API_KEY = "your-key"
+```
+
+Catalog results are metadata only. Toaster launches games only from local
+paths returned by the library scan; the service does not download ROMs.
 
 ## Build on Windows
 
