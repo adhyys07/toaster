@@ -71,6 +71,8 @@ add_executable(emu
     src/frontend/main.cpp
     src/frontend/settings.cpp
     src/frontend/gl_fsr_upscaler.cpp
+    src/frontend/bios_manager.cpp
+    src/frontend/core/core_manager.cpp
     src/frontend/game_metadata.cpp
     src/frontend/save_state_manager.cpp
     src/frontend/crash_logger.cpp
@@ -113,7 +115,11 @@ if(WIN32)
     target_link_libraries(emu PRIVATE "${COMDLG32_LIBRARY}")
 else()
     find_package(OpenGL REQUIRED)
-    target_link_libraries(emu PRIVATE OpenGL::GL)
+    target_link_libraries(emu PRIVATE OpenGL::GL ${CMAKE_DL_LIBS})
+    if(UNIX)
+        find_package(Threads REQUIRED)
+        target_link_libraries(emu PRIVATE Threads::Threads)
+    endif()
 endif()
 
 find_package(SDL2_ttf REQUIRED)

@@ -21,6 +21,7 @@
 #include "settings.h"
 #include "ps2_system.h"
 #include "crash_logger.h"
+#include "core/core_manager.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -1950,6 +1951,30 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return EXIT_FAILURE;
     }
+
+    char* raw_base_path = SDL_GetBasePath();
+    const fs::path executable_directory = raw_base_path
+        ? fs::path(raw_base_path)
+        : fs::current_path();
+    if (raw_base_path) SDL_free(raw_base_path);
+
+    const fs::path core_directory = executable_directory / "cores";
+    const emu::frontend::CoreManager core_manager(core_directory);
+    const auto resolveCore = [&](std::string& configured,
+                                 emu::frontend::CoreSystem system) {
+        if (fs::path(configured).is_absolute()) return;
+        const fs::path beside_executable = executable_directory / configured;
+        if (fs::exists(beside_executable)) {
+            configured = beside_executable.string();
+            return;
+        }
+        if (const auto discovered = core_manager.find(system)) {
+            configured = discovered->path.string();
+        }
+    };
+    resolveCore(ps1_core, emu::frontend::CoreSystem::Ps1);
+    resolveCore(psp_core, emu::frontend::CoreSystem::Psp);
+    resolveCore(ps2_core, emu::frontend::CoreSystem::Ps2);
 
     if (rom_path.empty() && ps1_game_path.empty() && ps2_game_path.empty()) {
         rom_path = showGameMenu(
