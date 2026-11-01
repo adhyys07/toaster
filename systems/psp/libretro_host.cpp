@@ -14,6 +14,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -48,6 +51,10 @@ struct LibretroApi {
     decltype(&retro_load_game) load_game = nullptr;
     decltype(&retro_unload_game) unload_game = nullptr;
     decltype(&retro_run) run = nullptr;
+    decltype(&retro_serialize_size) serialize_size = nullptr;
+    decltype(&retro_serialize) serialize = nullptr;
+    decltype(&retro_unserialize) unserialize = nullptr;
+    decltype(&retro_reset) reset = nullptr;
 };
 
 template <typename Function>
@@ -74,6 +81,7 @@ public:
         }
         system_directory_ = system_directory;
         system_name_ = system_name;
+        game_name_ = std::filesystem::path(game_path).stem().string();
         mute_ = mute;
         settings_ = settings;
         active_ = this;
@@ -108,6 +116,8 @@ private:
     bool game_loaded_ = false;
     bool mute_ = false;
     bool quit_ = false;
+    bool menu_open_ = false;
+    int menu_selection_ = 0;
     uint16_t joypad_state_ = 0;
     int16_t analog_x_ = 0;
     int16_t analog_y_ = 0;
@@ -115,6 +125,7 @@ private:
     int16_t right_analog_y_ = 0;
     std::string system_directory_;
     std::string system_name_;
+    std::string game_name_;
     std::string base_window_title_;
     emu::frontend::Settings settings_{};
     std::map<std::string, std::string> core_options_;
@@ -127,6 +138,199 @@ private:
     unsigned framebuffer_height_ = 272;
     unsigned frame_width_ = 480;
     unsigned frame_height_ = 272;
+
+    static constexpr int kMenuItemCount = 13;
+
+    void updateMenuTitle() {
+        static constexpr const char* items[kMenuItemCount] = {
+            "Resume", "Save State 1", "Load State 1", "Save State 2",
+            "Load State 2", "Reset Game", "Toggle VSync", "Toggle FPS",
+            "Volume -", "Volume +", "Mute Audio", "Toggle Fullscreen", "Quit"
+        };
+        if (!menu_open_) {
+            SDL_SetWindowTitle(window_, base_window_title_.c_str());
+            return;
+        }
+        std::string title = base_window_title_ + " | PAUSED | ";
+        title += items[menu_selection_];
+        SDL_SetWindowTitle(window_, title.c_str());
+    }
+
+    void toggleFullscreen() {
+        const bool current = (SDL_GetWindowFlags(window_) &
+                              SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+        SDL_SetWindowFullscreen(window_,
+                                current ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+    }
+
+    void handleMenuControllerButton(SDL_GameControllerButton button) {
+        if (!menu_open_) return;
+        if (button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+            menu_selection_ = (menu_selection_ + kMenuItemCount - 1) %
+                              kMenuItemCount;
+        } else if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+            menu_selection_ = (menu_selection_ + 1) % kMenuItemCount;
+        } else if (button == SDL_CONTROLLER_BUTTON_A) {
+            activateMenuItem();
+            return;
+        } else if (button == SDL_CONTROLLER_BUTTON_B) {
+            menu_open_ = false;
+        } else {
+            return;
+        }
+        updateMenuTitle();
+    }
+
+    void activateMenuItem() {
+        std::string error;
+        switch (menu_selection_) {
+        case 0:
+            menu_open_ = false;
+            break;
+        case 1:
+            if (!saveState(0, error))
+                std::fprintf(stderr, "Save state failed: %s\n", error.c_str());
+            break;
+        case 2:
+            if (!loadState(0, error))
+                std::fprintf(stderr, "Load state failed: %s\n", error.c_str());
+            break;
+        case 3:
+            if (!saveState(1, error))
+                std::fprintf(stderr, "Save state failed: %s\n", error.c_str());
+            break;
+        case 4:
+            if (!loadState(1, error))
+                std::fprintf(stderr, "Load state failed: %s\n", error.c_str());
+            break;
+        case 5:
+            if (api_.reset) api_.reset();
+            break;
+        case 6:
+            settings_.vsync = !settings_.vsync;
+            SDL_GL_SetSwapInterval(settings_.vsync ? 1 : 0);
+            break;
+        case 7:
+            settings_.show_fps = !settings_.show_fps;
+            break;
+        case 8:
+            settings_.volume = std::max(0, settings_.volume - 5);
+            break;
+        case 9:
+            settings_.volume = std::min(100, settings_.volume + 5);
+            break;
+        case 10:
+            mute_ = !mute_;
+            break;
+        case 11:
+            toggleFullscreen();
+            break;
+        case 12:
+            quit_ = true;
+            break;
+        default:
+            break;
+        }
+        updateMenuTitle();
+    }
+
+    std::filesystem::path stateFile(int slot) const {
+        const std::string prefix = game_name_.empty() ? system_name_ : game_name_;
+        return std::filesystem::path(system_directory_) / "states" /
+            (prefix + "_slot" + std::to_string(slot + 1) + ".state");
+    }
+
+    bool saveState(int slot, std::string& error) {
+        if (!api_.serialize_size || !api_.serialize) {
+            error = "This core does not support save states";
+            return false;
+        }
+        const size_t size = api_.serialize_size();
+        if (size == 0) {
+            error = "The core returned an invalid save-state size";
+            return false;
+        }
+        std::vector<uint8_t> buffer(size);
+        if (!api_.serialize(buffer.data(), buffer.size())) {
+            error = "The core failed to serialize its state";
+            return false;
+        }
+        const auto file = stateFile(slot);
+        std::error_code filesystem_error;
+        std::filesystem::create_directories(file.parent_path(), filesystem_error);
+        if (filesystem_error) {
+            error = "Could not create save-state directory: " +
+                    filesystem_error.message();
+            return false;
+        }
+        const auto temporary = file.string() + ".tmp";
+        std::ofstream output(temporary, std::ios::binary);
+        if (!output) {
+            error = "Could not create save-state file";
+            return false;
+        }
+        output.write(reinterpret_cast<const char*>(buffer.data()),
+                     static_cast<std::streamsize>(buffer.size()));
+        output.close();
+        if (!output) {
+            error = "Could not write save-state file";
+            return false;
+        }
+        std::filesystem::rename(temporary, file, filesystem_error);
+        if (filesystem_error) {
+            std::filesystem::remove(temporary);
+            error = "Could not finalize save-state file: " +
+                    filesystem_error.message();
+            return false;
+        }
+        return true;
+    }
+
+    bool loadState(int slot, std::string& error) {
+        if (!api_.serialize_size || !api_.unserialize) {
+            error = "This core does not support save states";
+            return false;
+        }
+        std::ifstream input(stateFile(slot), std::ios::binary);
+        if (!input) {
+            error = "Save-state file does not exist";
+            return false;
+        }
+        std::vector<uint8_t> buffer{
+            std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        if (buffer.empty() || !api_.unserialize(buffer.data(), buffer.size())) {
+            error = "The core rejected the save-state";
+            return false;
+        }
+        return true;
+    }
+
+    void drawPauseOverlay() {
+        if (!menu_open_) return;
+
+        glDisable(GL_SCISSOR_TEST);
+        if (bind_framebuffer_) bind_framebuffer_(GL_FRAMEBUFFER, 0);
+        glDrawBuffer(GL_BACK);
+
+        // Draw a simple, dependency-free menu panel using the core OpenGL
+        // context. The selected row is brighter; the window title contains
+        // the text for the selected action.
+        glEnable(GL_SCISSOR_TEST);
+        const int panel_width = std::max(320, drawable_width_ / 3);
+        const int panel_height = std::min(drawable_height_, 420);
+        const int panel_x = (drawable_width_ - panel_width) / 2;
+        const int panel_y = (drawable_height_ - panel_height) / 2;
+        glScissor(panel_x, panel_y, panel_width, panel_height);
+        glClearColor(0.04f, 0.05f, 0.08f, 0.96f);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        const int row_height = std::max(1, panel_height / kMenuItemCount);
+        const int selected_y = panel_y + menu_selection_ * row_height;
+        glScissor(panel_x, selected_y, panel_width, row_height);
+        glClearColor(0.12f, 0.35f, 0.70f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+    }
 
     using GenFramebuffersFn = void (APIENTRY *)(GLsizei, GLuint*);
     using BindFramebufferFn = void (APIENTRY *)(GLenum, GLuint);
@@ -592,6 +796,13 @@ private:
         LOAD_RETRO(load_game, "retro_load_game")
         LOAD_RETRO(unload_game, "retro_unload_game")
         LOAD_RETRO(run, "retro_run")
+        api_.serialize_size = loadFunction<decltype(api_.serialize_size)>(
+            module_, "retro_serialize_size");
+        api_.serialize = loadFunction<decltype(api_.serialize)>(
+            module_, "retro_serialize");
+        api_.unserialize = loadFunction<decltype(api_.unserialize)>(
+            module_, "retro_unserialize");
+        api_.reset = loadFunction<decltype(api_.reset)>(module_, "retro_reset");
 #undef LOAD_RETRO
         return true;
     }
@@ -603,12 +814,10 @@ private:
         api_.set_audio_sample_batch(audioSampleBatch);
         api_.set_input_poll(inputPoll);
         api_.set_input_state(inputState);
+
         api_.init();
         core_initialized_ = true;
 
-        // Birdman's Shooter's own PPSSPP instructions recommend software
-        // rendering for its graphics. The Libretro core exposes this as a
-        // core option, so select it before retro_load_game reads the options.
         std::string normalized_game_path = game_path;
         std::transform(normalized_game_path.begin(), normalized_game_path.end(),
                        normalized_game_path.begin(), [](unsigned char ch) {
@@ -873,6 +1082,9 @@ private:
     void runLoop() {
         openController();
         quit_ = false;
+        menu_open_ = false;
+        menu_selection_ = 0;
+        updateMenuTitle();
         const Uint64 frequency = SDL_GetPerformanceFrequency();
         const double frame_ticks = frame_duration_ * static_cast<double>(frequency);
         double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
@@ -884,21 +1096,47 @@ private:
             while (SDL_PollEvent(&event)) {
                 if (event.type == SDL_QUIT) quit_ = true;
                 else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
-                    if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) quit_ = true;
-                    if (event.key.keysym.scancode == SDL_SCANCODE_F11) {
+                    const SDL_Scancode key = event.key.keysym.scancode;
+                    if (key == SDL_SCANCODE_F1) {
+                        menu_open_ = !menu_open_;
+                        updateMenuTitle();
+                    } else if (menu_open_ && key == SDL_SCANCODE_ESCAPE) {
+                        menu_open_ = false;
+                        updateMenuTitle();
+                    } else if (menu_open_ && key == SDL_SCANCODE_UP) {
+                        menu_selection_ = (menu_selection_ + kMenuItemCount - 1) %
+                                          kMenuItemCount;
+                        updateMenuTitle();
+                    } else if (menu_open_ && key == SDL_SCANCODE_DOWN) {
+                        menu_selection_ = (menu_selection_ + 1) % kMenuItemCount;
+                        updateMenuTitle();
+                    } else if (menu_open_ && key == SDL_SCANCODE_RETURN) {
+                        activateMenuItem();
+                    } else if (!menu_open_ && key == SDL_SCANCODE_ESCAPE) {
+                        quit_ = true;
+                    } else if (key == SDL_SCANCODE_F11) {
                         const bool current = (SDL_GetWindowFlags(window_) &
                             SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
                         SDL_SetWindowFullscreen(window_, current ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
                     }
-                    if (event.key.keysym.scancode == SDL_SCANCODE_M) {
+                    if (key == SDL_SCANCODE_M) {
                         mute_ = !mute_;
-                    } else if (event.key.keysym.scancode == SDL_SCANCODE_MINUS) {
+                    } else if (key == SDL_SCANCODE_MINUS) {
                         settings_.volume = std::max(0, settings_.volume - 5);
-                    } else if (event.key.keysym.scancode == SDL_SCANCODE_EQUALS) {
+                    } else if (key == SDL_SCANCODE_EQUALS) {
                         settings_.volume = std::min(100, settings_.volume + 5);
                     }
                 } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                     openController();
+                } else if (event.type == SDL_CONTROLLERBUTTONDOWN) {
+                    if (event.cbutton.button == SDL_CONTROLLER_BUTTON_BACK) {
+                        menu_open_ = !menu_open_;
+                        updateMenuTitle();
+                    } else {
+                        handleMenuControllerButton(
+                            static_cast<SDL_GameControllerButton>(
+                                event.cbutton.button));
+                    }
                 } else if (event.type == SDL_CONTROLLERDEVICEREMOVED && controller_ &&
                            SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller_)) ==
                                event.cdevice.which) {
@@ -934,8 +1172,9 @@ private:
                 viewport(0, 0, static_cast<GLsizei>(framebuffer_width_),
                          static_cast<GLsizei>(framebuffer_height_));
             }
-            api_.run();
+            if (!menu_open_) api_.run();
             presentFramebuffer();
+            drawPauseOverlay();
             SDL_GL_SwapWindow(window_);
 
             if (settings_.show_fps) {
@@ -983,8 +1222,6 @@ private:
             SDL_CloseAudioDevice(audio_device_);
             audio_device_ = 0;
         }
-        // Keep the core's live graphics context current during context teardown.
-        // Notify it while the core and game are still initialized.
         if (hw_context_active_ && hw_render_.context_destroy && gl_context_) {
             SDL_GL_MakeCurrent(window_, gl_context_);
             hw_render_.context_destroy();
@@ -1048,4 +1285,4 @@ bool LibretroHost::run(const std::string& core_path,
                     fullscreen, mute, settings, error);
 }
 
-}  // namespace emu::libretro
+}

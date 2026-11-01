@@ -90,6 +90,8 @@ Keyboard controls during Libretro gameplay:
 | L1 / R1 | Q / E |
 | L2 / R2 | 1 / 3 |
 | Start / Select | Enter / Backspace |
+| Pause/configuration menu | F1, then Up/Down and Enter |
+| Resume from menu | Escape |
 | Fullscreen | F11 |
 | Exit | Escape |
 

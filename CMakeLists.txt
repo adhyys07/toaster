@@ -83,7 +83,8 @@ add_executable(emu
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
-    systems/ps1/ps1_system.cpp)
+    systems/ps1/ps1_system.cpp
+    src/frontend/pause_menu.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core)
 
