@@ -15,6 +15,7 @@
 #include <SDL_ttf.h>
 #include "core/registry.h"
 #include "psp_system.h"
+#include "ps1_system.h"
 #include "gl_fsr_upscaler.h"
 #include <array>
 #include "settings.h"
@@ -24,6 +25,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
+#include <urlmon.h>
 #endif
 
 namespace {
@@ -34,8 +36,10 @@ void printUsage(const char* exe) {
         "  --rom PATH          launch a ROM directly\n"
         "  --games-dir PATH    scan this folder in the startup library\n"
         "  --ppsspp-core PATH  path to the PPSSPP Libretro core\n"
+        "  --ps1-core PATH     path to the PS1 Libretro core\n"
         "  --ps2 PATH          launch a PS2 image directly\n"
         "  --ps2-core PATH     path to the LRPS2 Libretro core\n"
+        "  --core-server URL   HTTPS base URL for core downloads\n"
         "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
@@ -175,6 +179,7 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
         if (extension == ".ch8" || extension == ".c8" || extension == ".nes" ||
             extension == ".gb" ||
             extension == ".iso" || extension == ".cso" || extension == ".pbp" ||
+            extension == ".cue" ||
             extension == ".chd" || extension == ".elf" || extension == ".prx" ||
             extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
             extension == ".zso" || extension == ".mdf" || extension == ".nrg" ||
@@ -349,7 +354,7 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
     
     SDL_Window* window = SDL_CreateWindow(
         "Controller Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        620, 560, SDL_WINDOW_SHOWN);
+        620, 560, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) return;
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
@@ -428,7 +433,7 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
 bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     SDL_Window* window = SDL_CreateWindow(
         "Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        760, 600, SDL_WINDOW_SHOWN);
+        760, 760, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!window) return false;
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
@@ -446,9 +451,9 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     const SDL_Rect sharpness_up{628, 255, 52, 44};
     const SDL_Rect fps_button{410, 310, 270, 44};
     const SDL_Rect scaling_button{410, 365, 270, 44};
-    const SDL_Rect save_button{410, 535, 125, 44};
-    const SDL_Rect cancel_button{555, 535, 125, 44};
-    const SDL_Rect controller_button{60, 535, 250, 44};
+    const SDL_Rect save_button{410, 685, 125, 44};
+    const SDL_Rect cancel_button{555, 685, 125, 44};
+    const SDL_Rect controller_button{60, 685, 250, 44};
     
     
 
@@ -496,13 +501,13 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
                           settings.sharpness);
             drawMenuText(renderer, font, sharpness_text, 515, 267, white);
             drawMenuText(renderer, font, "Nearest and Linear use SDL scaling.",
-                         36, 370, muted);
+                         36, 480, muted);
             drawMenuText(renderer, font, "FSR 1 uses OpenGL EASU + RCAS passes.",
-                         36, 397, muted);
+                         36, 512, muted);
             drawMenuText(renderer, font, "NES supports mappers 0, 1, 2, 3, 4, 7; MMC3 IRQ timing is approximate.",
-                         36, 435, muted, 680);
+                         36, 544, muted, 680);
             drawMenuText(renderer, font, "PICO-8 still requires a separate compatible core.",
-                         36, 463, muted, 680);
+                         36, 592, muted, 680);
             drawMenuButton(renderer, font, save_button, "Save", mouse_x, mouse_y);
             drawMenuButton(renderer, font, cancel_button, "Cancel", mouse_x, mouse_y);
             SDL_RenderPresent(renderer);
@@ -567,10 +572,13 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
 }
 std::string chooseRomFile();
 bool importPs2Bios(const std::string& system_directory);
+bool importPs1Bios(const std::string& system_directory);
+bool installCoreFiles(const std::string& server_url);
 
 std::string showGameMenu(const fs::path& folder,
                          emu::frontend::Settings& settings,
-                         const std::string& system_directory) {
+                         const std::string& system_directory,
+                         const std::string& core_server_url) {
     auto games = scanGames(folder);
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
@@ -588,7 +596,7 @@ std::string showGameMenu(const fs::path& folder,
 
     SDL_Window* menu_window = SDL_CreateWindow(
         "Emulator Game Library", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1000, 650, SDL_WINDOW_SHOWN);
+        1000, 650, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     SDL_Renderer* menu_renderer = menu_window
         ? SDL_CreateRenderer(menu_window, -1, SDL_RENDERER_ACCELERATED)
         : nullptr;
@@ -613,13 +621,14 @@ std::string showGameMenu(const fs::path& folder,
     const SDL_Rect open_button{650, 548, 140, 44};
     const SDL_Rect rescan_button{800, 548, 150, 44};
     const SDL_Rect settings_button{830, 24, 130, 40};
+    const SDL_Rect ps1_bios_button{510, 24, 145, 40};
     const SDL_Rect bios_button{670, 24, 145, 40};
+    const SDL_Rect cores_button{510, 70, 145, 40};
     bool running = true;
     bool redraw = true;
     std::string result;
     std::string search;
     bool search_active = false;
-
     while (running) {
         if (redraw) {
             const std::vector<GameEntry> visible_games =
@@ -648,6 +657,8 @@ std::string showGameMenu(const fs::path& folder,
             drawMenuButton(menu_renderer, font, settings_button, "Settings",
                            mouse_x, mouse_y);
             drawMenuButton(menu_renderer, font, bios_button, "Install PS2 BIOS",
+                           mouse_x, mouse_y);
+            drawMenuButton(menu_renderer, font, cores_button, "Install Cores",
                            mouse_x, mouse_y);
 
             const SDL_Rect list_panel{20, 94, 440, 442};
@@ -870,6 +881,18 @@ std::string showGameMenu(const fs::path& folder,
                     break;
                 }
 
+                if (pointInside(ps1_bios_button,event.button.x, event.button.y)) {
+                    importPs1Bios(system_directory);
+                    redraw = true;
+                    break;
+                }
+
+                if (pointInside(cores_button, event.button.x, event.button.y)) {
+                    installCoreFiles(core_server_url);
+                    redraw = true;
+                    break;
+                }
+
                 if (pointInside(bios_button, event.button.x, event.button.y)) {
                     importPs2Bios(system_directory);
                     redraw = true;
@@ -979,7 +1002,24 @@ bool gamepadButtonDown(SDL_GameController* controller,
     return false;
 }
 
+int keyboardBindingIndex(const char* button_name) {
+    const std::string name = normalizedButtonName(button_name);
 
+    if (name == "A") return emu::frontend::PadCross;
+    if (name == "B") return emu::frontend::PadCircle;
+    if (name == "X") return emu::frontend::PadSquare;
+    if (name == "Y" || name == "SQUARE") return emu::frontend::PadSquare;
+    if (name == "O" || name == "TRIANGLE") return emu::frontend::PadTriangle;
+    if (name == "START") return emu::frontend::PadStart;
+    if (name == "SELECT") return emu::frontend::PadSelect;
+    if (name == "UP") return emu::frontend::PadUp;
+    if (name == "DOWN") return emu::frontend::PadDown;
+    if (name == "LEFT") return emu::frontend::PadLeft;
+    if (name == "RIGHT") return emu::frontend::PadRight;
+    if (name == "L1") return emu::frontend::PadL1;
+    if (name == "R1") return emu::frontend::PadR1;
+    return -1;
+}
 
 SDL_Scancode nesPlayerTwoKey(const char* button_name) {
     const std::string name = normalizedButtonName(button_name);
@@ -1111,7 +1151,6 @@ int runGenericGame(const std::string& rom_path,
                                         SDL_TEXTUREACCESS_STREAMING,
                                         texture_width, texture_height);
             if (!texture) return false;
-            SDL_RenderSetLogicalSize(renderer, texture_width, texture_height);
         }
 
         return SDL_UpdateTexture(texture, nullptr, frame.pixels,
@@ -1267,15 +1306,18 @@ int runGenericGame(const std::string& rom_path,
         for (int port = 0; port < system->portCount(); ++port) {
             uint32_t button_state = 0;
 
-            int button_index = 0;
             for (const emu::ButtonInfo& button : system->buttons()) {
                 bool down = false;
                 const std::string button_name = normalizedButtonName(button.name);
 
-                // Player 1 uses the keyboard bindings declared by the core.
-                if (port == 0 && button_index < emu::frontend::kPadActionCount) {
-                    const SDL_Scancode key = static_cast<SDL_Scancode>(
-                        settings.keyboard_keys[button_index]);
+                // Player 1 uses named bindings so core button ordering does
+                // not change the meaning of Start and Select.
+                if (port == 0) {
+                    const int binding_index = keyboardBindingIndex(button.name);
+                    const SDL_Scancode key = binding_index >= 0
+                        ? static_cast<SDL_Scancode>(
+                            settings.keyboard_keys[binding_index])
+                        : SDL_GetScancodeFromName(button.default_key);
                     if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
                         down = true;
                     }
@@ -1304,7 +1346,6 @@ int runGenericGame(const std::string& rom_path,
                     down = true;
                 }
                 if (down) button_state |= button.mask;
-                ++button_index;
             }
 
             system->setInput(port, button_state);
@@ -1411,7 +1452,7 @@ std::string chooseRomFile() {
     OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter =
-        "Supported games\0*.nes;*.gb;*.ch8;*.c8;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
+        "Supported games\0*.nes;*.gb;*.ch8;*.c8;*.cue;*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "PSP games\0*.iso;*.cso;*.pbp;*.chd;*.elf;*.prx\0"
         "PS2 games\0*.iso;*.cso;*.chd;*.elf;*.bin;*.m3u;*.ciso;*.zso;*.mdf;*.nrg;*.dump;*.img\0"
         "All files\0*.*\0";
@@ -1428,6 +1469,152 @@ std::string chooseRomFile() {
 #endif
     return {};
 }
+
+bool importPs1Bios(const std::string& system_directory) {\
+#ifdef _WIN32
+    char filename[32768] = {};
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFilter =
+        "PS1 BIOS images (*.bin;*.rom;*.bios)\0*.bin;*.rom;*.bios\0"
+        "All files\0*.*\0";
+    dialog.lpstrFile = filename;
+    dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
+    dialog.Flags = OFN_FILEMUSTEXIST |
+                   OFN_PATHMUSTEXIST |
+                   OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = "Select a PS1 BIOS dump you own";
+
+    if (!GetOpenFileNameA(&dialog)) {
+        return false;
+    }
+
+    std::error_code error;
+    const fs::path source = fs::absolute(fs::path(filename), error);
+
+    if (error || !fs::is_regular_file(source, error) || error) {
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR,
+            "PS1 BIOS",
+            "The selected BIOS file could not be read.",
+            nullptr);
+        return false;
+    }
+
+    fs::path base_path;
+    if (char* raw_base = SDL_GetBasePath()) {
+        base_path = raw_base;
+        SDL_free(raw_base);
+    }
+
+    const fs::path requested_system(system_directory);
+    std::vector<fs::path> candidates{requested_system};
+
+    if (!requested_system.is_absolute() && !base_path.empty()) {
+        candidates.push_back(base_path / requested_system);
+        candidates.push_back(base_path.parent_path() / requested_system);
+    }
+
+    fs::path system_root;
+
+    for (const fs::path& candidate : candidates) {
+        error.clear();
+
+        if (fs::is_directory(candidate, error) && !error) {
+            system_root = candidate;
+            break;
+        }
+    }
+
+    if (system_root.empty()) {
+        system_root = requested_system.is_absolute()
+            ? requested_system
+            : (base_path.empty()
+                ? fs::current_path()
+                : base_path) / requested_system;
+    }
+
+    const fs::path bios_directory = system_root / "swanstation" / "bios";
+    error.clear();
+    fs::create_directories(bios_directory, error);
+
+    if (error) {
+        const std::string message =
+            "Could not create the PS1 BIOS folder:\n" +
+            bios_directory.string() +
+            "\n\n" +
+            error.message();
+
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR,
+            "PS1 BIOS",
+            message.c_str(),
+            nullptr);
+
+        return false;
+    }
+
+    const fs::path destination = bios_directory / source.filename();
+    error.clear();
+
+    if (fs::equivalent(source, destination, error) && !error) {
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_INFORMATION,
+            "PS1 BIOS",
+            "That BIOS is already installed.",
+            nullptr);
+
+        return true;
+    }
+
+    error.clear();
+
+    fs::copy_file(
+        source,
+        destination,
+        fs::copy_options::overwrite_existing,
+        error);
+
+    if (error) {
+        const std::string message =
+            "Could not copy the PS1 BIOS:\n" +
+            error.message();
+
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR,
+            "PS1 BIOS",
+            message.c_str(),
+            nullptr);
+
+        return false;
+    }
+
+    const std::string message =
+        "PS1 BIOS installed to:\n" +
+        destination.string() +
+        "\n\nRestart the PS1 game if it is already running.";
+
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION,
+        "PS1 BIOS",
+        message.c_str(),
+        nullptr);
+
+    return true;
+#else
+    (void)system_directory;
+
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION,
+        "PS1 BIOS",
+        "Copy your legally dumped PS1 BIOS into "
+        "system/swanstation/bios.",
+        nullptr);
+
+    return false;
+#endif
+}
+
 
 bool importPs2Bios(const std::string& system_directory) {
 #ifdef _WIN32
@@ -1522,8 +1709,64 @@ bool importPs2Bios(const std::string& system_directory) {
 #endif
 }
 
+bool installCoreFiles(const std::string& server_url) {
+#ifdef _WIN32
+    char* raw_base = SDL_GetBasePath();
+    const fs::path base = raw_base ? fs::path(raw_base) : fs::current_path();
+    if (raw_base) SDL_free(raw_base);
+
+    const fs::path core_directory = base / "cores";
+    std::error_code error;
+    fs::create_directories(core_directory, error);
+    if (error) {
+        SDL_ShowSimpleMessageBox(
+            SDL_MESSAGEBOX_ERROR, "Core installation",
+            ("Could not create the cores folder:\n" +
+             core_directory.string() + "\n\n" + error.message()).c_str(),
+            nullptr);
+        return false;
+    }
+
+    std::string base_url = server_url;
+    while (!base_url.empty() && base_url.back() == '/') base_url.pop_back();
+
+    const std::vector<std::string> files = {
+        "swanstation_libretro.dll",
+        "ppsspp_libretro.dll",
+        "pcsx2_libretro.dll"
+    };
+
+    for (const std::string& filename : files) {
+        const std::string url = base_url + "/" + filename;
+        const fs::path destination = core_directory / filename;
+        const HRESULT result = URLDownloadToFileA(
+            nullptr, url.c_str(), destination.string().c_str(), 0, nullptr);
+        if (FAILED(result)) {
+            SDL_ShowSimpleMessageBox(
+                SDL_MESSAGEBOX_ERROR, "Core installation",
+                ("Could not download:\n" + url).c_str(), nullptr);
+            return false;
+        }
+    }
+
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION, "Core installation",
+        ("PS1, PSP, and PS2 cores were installed in:\n" +
+         core_directory.string()).c_str(), nullptr);
+    return true;
+#else
+    (void)server_url;
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION, "Core installation",
+        "Automatic core installation is currently implemented for Windows.",
+        nullptr);
+    return false;
+#endif
+}
+
 enum class SelectedSystem {
     Generic,
+    PS1,
     PSP,
     PS2,
     Cancel
@@ -1537,6 +1780,8 @@ SelectedSystem selectSystemForGame(const std::string& path) {
 
     if (extension == ".pbp" || extension == ".prx")
         return SelectedSystem::PSP;
+    if (extension == ".cue")
+        return SelectedSystem::PS1;
     if (extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
         extension == ".zso" || extension == ".mdf" || extension == ".nrg" ||
         extension == ".dump" || extension == ".img")
@@ -1546,22 +1791,25 @@ SelectedSystem selectSystemForGame(const std::string& path) {
         return SelectedSystem::Generic;
 
     const SDL_MessageBoxButtonData buttons[] = {
-        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "PSP"},
-        {0, 1, "PS2"},
-        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Cancel"}
+        {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "PS1"},
+        {0, 1, "PSP"},
+        {0, 2, "PS2"},
+        {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 3, "Cancel"}
     };
     SDL_MessageBoxData dialog{};
     dialog.flags = SDL_MESSAGEBOX_INFORMATION;
     dialog.window = nullptr;
     dialog.title = "Choose console";
-    dialog.message = "This file type can be used by PSP or PS2. Which system should open it?";
+    dialog.message = "Which system should open this disc image?";
     dialog.numbuttons = static_cast<int>(sizeof(buttons) / sizeof(buttons[0]));
     dialog.buttons = buttons;
 
-    int selected = 2;
-    if (SDL_ShowMessageBox(&dialog, &selected) != 0 || selected == 2)
+    int selected = 3;
+    if (SDL_ShowMessageBox(&dialog, &selected) != 0 || selected == 3)
         return SelectedSystem::Cancel;
-    return selected == 1 ? SelectedSystem::PS2 : SelectedSystem::PSP;
+    if (selected == 0) return SelectedSystem::PS1;
+    if (selected == 1) return SelectedSystem::PSP;
+    return SelectedSystem::PS2;
 }
 
 }  // namespace
@@ -1571,10 +1819,13 @@ int main(int argc, char** argv) {
     emu::frontend::Settings settings = emu::frontend::loadSettings();
 #ifdef _WIN32
     std::string psp_core = "cores/ppsspp_libretro.dll";
+    std::string ps1_core = "cores/swanstation_libretro.dll";
 #elif __APPLE__
     std::string psp_core = "cores/ppsspp_libretro.dylib";
+    std::string ps1_core = "cores/swanstation_libretro.dylib";
 #else
     std::string psp_core = "cores/ppsspp_libretro.so";
+    std::string ps1_core = "cores/swanstation_libretro.so";
 #endif
 #ifdef _WIN32
     std::string ps2_core = "cores/pcsx2_libretro.dll";
@@ -1584,7 +1835,10 @@ int main(int argc, char** argv) {
     std::string ps2_core = "cores/pcsx2_libretro.so";
 #endif
     std::string ps2_game_path;
+    std::string ps1_game_path;
     std::string system_directory = "system";
+    std::string core_server_url =
+        "https://example.com/toaster/cores";
     fs::path games_folder = "games";
     bool mute = settings.mute;
     bool fullscreen = settings.fullscreen;
@@ -1603,15 +1857,30 @@ int main(int argc, char** argv) {
         } else if (arg == "--ppsspp-core") {
             std::fprintf(stderr, "--ppsspp-core requires a path to the PPSSPP Libretro core\n");
             return EXIT_FAILURE;
+        } else if (arg == "--ps1-core" && i + 1 < argc) {
+            ps1_core = argv[++i];
+        } else if (arg == "--ps1-core") {
+            std::fprintf(stderr, "--ps1-core requires a path to the PS1 Libretro core\n");
+            return EXIT_FAILURE;
         } else if (arg == "--ps2-core" && i + 1 < argc) {
             ps2_core = argv[++i];
         } else if (arg == "--ps2-core") {
             std::fprintf(stderr, "--ps2-core requires a path to the LRPS2 Libretro core\n");
             return EXIT_FAILURE;
+        } else if (arg == "--core-server" && i + 1 < argc) {
+            core_server_url = argv[++i];
+        } else if (arg == "--core-server") {
+            std::fprintf(stderr, "--core-server requires an HTTPS base URL\n");
+            return EXIT_FAILURE;
         } else if (arg == "--ps2" && i + 1 < argc) {
             ps2_game_path = argv[++i];
         } else if (arg == "--ps2") {
             std::fprintf(stderr, "--ps2 requires a game file path\n");
+            return EXIT_FAILURE;
+        } else if (arg == "--ps1" && i + 1 < argc) {
+            ps1_game_path = argv[++i];
+        } else if (arg == "--ps1") {
+            std::fprintf(stderr, "--ps1 requires a game file path\n");
             return EXIT_FAILURE;
         } else if (arg == "--system-dir" && i + 1 < argc) {
             system_directory = argv[++i];
@@ -1633,8 +1902,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!ps2_game_path.empty() && !rom_path.empty()) {
-        std::fprintf(stderr, "Use either --ps2 PATH or --rom PATH, not both.\n");
+    if ((!ps2_game_path.empty() || !ps1_game_path.empty()) && !rom_path.empty()) {
+        std::fprintf(stderr, "Use an explicit system option or --rom, not both.\n");
+        return EXIT_FAILURE;
+    }
+    if (!ps2_game_path.empty() && !ps1_game_path.empty()) {
+        std::fprintf(stderr, "Use either --ps1 PATH or --ps2 PATH, not both.\n");
         return EXIT_FAILURE;
     }
 
@@ -1644,14 +1917,23 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    if (rom_path.empty() && ps2_game_path.empty()) {
-        rom_path = showGameMenu(games_folder, settings, system_directory);
+    if (rom_path.empty() && ps1_game_path.empty() && ps2_game_path.empty()) {
+        rom_path = showGameMenu(
+            games_folder, settings, system_directory, core_server_url);
         mute = settings.mute;
         fullscreen = settings.fullscreen;
         if (rom_path.empty()) {
             SDL_Quit();
             return EXIT_SUCCESS;
         }
+    }
+
+    if (!ps1_game_path.empty()) {
+        const int result = emu::ps1::runPs1Game(
+            ps1_core, ps1_game_path, system_directory, fullscreen, mute,
+            settings);
+        SDL_Quit();
+        return result;
     }
 
     if (!ps2_game_path.empty()) {
@@ -1670,6 +1952,12 @@ int main(int argc, char** argv) {
     if (selected_system == SelectedSystem::PS2) {
         const int result = emu::ps2::runPs2Game(
             ps2_core, rom_path, system_directory, fullscreen, mute, settings);
+        SDL_Quit();
+        return result;
+    }
+    if (selected_system == SelectedSystem::PS1) {
+        const int result = emu::ps1::runPs1Game(
+            ps1_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();
         return result;
     }

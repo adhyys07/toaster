@@ -65,8 +65,9 @@ add_executable(emu
     src/frontend/settings.cpp
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
-    systems/ps2/ps2_system.cpp)
-target_include_directories(emu PRIVATE systems/psp systems/ps2)
+    systems/ps2/ps2_system.cpp
+    systems/ps1/ps1_system.cpp)
+target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core)
 
 add_custom_command(TARGET emu POST_BUILD
@@ -86,6 +87,7 @@ set(CPACK_PACKAGE_VERSION "0.1.0")
 set(CPACK_GENERATOR "ZIP")
 
 if(WIN32)
+    target_link_libraries(emu PRIVATE urlmon)
     # Find the actual import library path so MinGW links libopengl32.a instead
     # of passing the MSVC-style name "opengl32.lib" to its linker.
     find_library(OPENGL32_LIBRARY NAMES opengl32)

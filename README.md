@@ -1,7 +1,52 @@
 ## Toaster
 
-Toaster is a retro game emulator with NES and CHIP-8 cores and an optional PSP with PS2
-frontend through PPSSPP's and PSPPX Libretro core.
+Toaster is a retro game emulator with NES, CHIP-8, GAME BOY, PS1, PSP, and PS2
+frontends through native and Libretro cores.
+
+### Core installer server
+
+The Game Library has an **Install Cores** button. It downloads Windows x64
+core DLLs from a static HTTPS directory into the executable's `cores` folder.
+The default URL is a placeholder, so configure your server URL when launching:
+
+```text
+build/emu.exe --core-server "https://downloads.example.com/toaster/cores"
+```
+
+The server directory must contain these exact files:
+
+```text
+swanstation_libretro.dll
+ppsspp_libretro.dll
+pcsx2_libretro.dll
+```
+
+For example, with nginx, place the files in
+`/var/www/toaster/cores/`, enable HTTPS, and verify:
+
+```text
+https://downloads.example.com/toaster/cores/swanstation_libretro.dll
+```
+
+The installer downloads emulator cores only. BIOS files are not downloaded
+from a server; import legally dumped BIOS files locally using the PS1/PS2 BIOS
+buttons in the Game Library.
+
+### PS1 setup
+
+PS1 support uses an external Libretro core such as SwanStation or Beetle PSX.
+The core is not bundled. Place it at
+`cores/swanstation_libretro.dll` or pass its path with `--ps1-core`.
+Place a legally dumped PS1 BIOS in `system/swanstation/bios`.
+
+Launch a PS1 game explicitly:
+
+```text
+build/emu.exe --ps1-core "D:/toaster/cores/swanstation_libretro.dll" --system-dir "D:/toaster/system" --ps1 "D:/My Games/game.cue"
+```
+
+`.cue`, `.chd`, and `.pbp` images may be supported by the selected core.
+Use a `.cue` file together with its referenced `.bin` tracks when possible.
 
 ### PSP setup
 
