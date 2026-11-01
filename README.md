@@ -1,15 +1,104 @@
-## Toaster
+# Toaster
 
-Toaster is a retro game emulator with NES, CHIP-8, GAME BOY, PS1, PSP, and PS2
-frontends through native and Libretro cores.
+Toaster is a small retro-game frontend for:
 
-### Core installer server
+- NES
+- CHIP-8
+- Game Boy
+- PlayStation 1
+- PSP
+- PlayStation 2
 
-The Game Library has an **Install Cores** button. It downloads Windows x64
-core DLLs from a static HTTPS directory into the executable's `cores` folder.
-It automatically fetches a file from a private server and install it automatically in few clicks.
+PS1, PSP, and PS2 support uses external Libretro cores.
 
-The server directory must contain these exact files:
+## Quick start
+
+Put cores beside the executable:
+
+```text
+Toaster/
+├── emu.exe
+├── cores/
+│   ├── swanstation_libretro.dll
+│   ├── ppsspp_libretro.dll
+│   └── pcsx2_libretro.dll
+└── system/
+```
+
+Toaster automatically searches the `cores` folder. You can also specify a core
+manually with `--ps1-core`, `--ppsspp-core`, or `--ps2-core`.
+
+## Run games
+
+### PS1
+
+```bash
+build/emu.exe \
+  --ps1 "/path/to/game.cue" \
+  --system-dir "/path/to/system"
+```
+
+Install your own legally dumped BIOS in:
+
+```text
+system/swanstation/bios/
+```
+
+### PSP
+
+```bash
+build/emu.exe \
+  --system-dir "/path/to/system" \
+  "/path/to/game.iso"
+```
+
+PPSSPP assets belong in:
+
+```text
+system/PPSSPP/
+```
+
+### PS2
+
+Use `--ps2` for ISO files so they are not confused with PSP games:
+
+```bash
+build/emu.exe \
+  --ps2 "/path/to/game.iso" \
+  --system-dir "/path/to/system"
+```
+
+Install your own legally dumped BIOS in:
+
+```text
+system/pcsx2/bios/
+```
+
+BIOS files are private firmware. Toaster does not distribute or upload BIOS
+files.
+
+## Controls
+
+Keyboard controls during Libretro gameplay:
+
+| Action | Key |
+|---|---|
+| D-pad | Arrow keys or numpad 2/4/6/8 |
+| Left stick | W/A/S/D |
+| Right stick | I/J/K/L |
+| Cross, Circle, Square, Triangle | Z, X, C, V |
+| L1 / R1 | Q / E |
+| L2 / R2 | 1 / 3 |
+| Start / Select | Enter / Backspace |
+| Fullscreen | F11 |
+| Exit | Escape |
+
+SDL-compatible game controllers are supported.
+
+## Core installer
+
+The Game Library can download cores from an HTTPS server. The server must
+contain permitted core files in `/cores/`:
 
 ```text
 swanstation_libretro.dll
@@ -17,80 +106,82 @@ ppsspp_libretro.dll
 pcsx2_libretro.dll
 ```
 
-The installer downloads emulator cores only.
+Start Toaster with:
 
-### BIOS Setup
-For BIOS, unfortunately we cannot provide BIOS files on server as they are private property but you can always install one from other websites and directly import them in the engine.
-
-### PS1 setup
-
-PS1 support uses an external Libretro core such as SwanStation or Beetle PSX.
-The core is not bundled. Place it at
-`cores/swanstation_libretro.dll` or pass its path with `--ps1-core`.
-Place a legally dumped PS1 BIOS in `system/swanstation/bios`.
-
-Launch a PS1 game explicitly:
-
-```text
-build/emu.exe --ps1-core "D:/toaster/cores/swanstation_libretro.dll" --system-dir "D:/toaster/system" --ps1 "D:/My Games/game.cue"
+```bash
+build/emu.exe \
+  --core-server "https://your-domain.example/cores"
 ```
 
-`.cue`, `.chd`, and `.pbp` images may be supported by the selected core.
-Use a `.cue` file together with its referenced `.bin` tracks when possible.
+Only distribute files you are legally allowed to redistribute. Never place
+BIOS files or games on the core server.
 
-<h2>FOR DEVELOPERS</h2>
+## Game library
 
-### PSP setup
+Start without a game to open the library:
 
-The PPSSPP core and its data assets are separate downloads and are not included
-with Toaster. Put the core in `cores/ppsspp_libretro.dll` (or pass its path with
-`--ppsspp-core`). Place PPSSPP's required assets in `system/PPSSPP` and pass the
-parent `system` directory with `--system-dir` if it is elsewhere. The PPSSPP
-core requires an OpenGL-capable system and its assets, including `lang` and
-`flash0` data.
-
-Start a PSP game from the command line:
-
-```text
-build/emu.exe --ppsspp-core "D:/path/to/ppsspp_libretro.dll" --system-dir "D:/toaster/system" "D:/path/to/game.iso"
+```bash
+build/emu.exe
 ```
 
-The game library also lists PSP images with `.iso`, `.cso`, `.pbp`, `.chd`,
-`.elf`, and `.prx` extensions. Keyboard controls are arrow keys for the D-pad,
-Z/X/A/S for Cross/Circle/Square/Triangle, Q/W for L/R, Enter for Start, and
-Right Shift for Select. A connected SDL game controller is supported as well.
-Press F11 to toggle fullscreen and Escape to exit gameplay.
+Put games in `games/`, or select another folder:
 
-### PS2 setup (LRPS2)
-
-PS2 support loads the LRPS2 Libretro core into Toaster's existing Libretro/OpenGL
-host. The core is not bundled. Place its Windows x64 build at
-`cores/pcsx2_libretro.dll`, or pass a different path with `--ps2-core`.
-LRPS2 requires a PS2 BIOS dumped from a console you own. Put the extracted BIOS
-files under `system/pcsx2/bios`; see the
-[LRPS2 setup guide](https://docs.libretro.com/library/lrps2/) for required BIOS
-files and hardware requirements.
-
-Launch a PS2 disc image explicitly with `--ps2` so `.iso` files are not confused
-with PSP games:
-
-```text
-build/emu.exe --ps2-core "D:/toaster/cores/pcsx2_libretro.dll" --system-dir "D:/toaster/system" --ps2 "D:/My Games/game.iso"
+```bash
+build/emu.exe --games-dir "/path/to/games"
 ```
 
-From the game library, shared formats such as `.iso`, `.cso`, `.chd`, and `.elf`
-prompt you to choose PSP or PS2. PS2-only formats are routed to LRPS2.
+The library supports common NES, Game Boy, PSP, PS1, and PS2 image formats.
 
-### Build, test, and package
+## Build on Windows
 
-Configure and build with CMake:
+Install CMake, Ninja, MinGW-w64, Python 3, SDL2, and SDL2_ttf. Then run:
 
-```text
-cmake -S . -B build
-cmake --build build
+```bash
+cmake -S . -B build -G Ninja
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-cmake --build build --target package
 ```
 
-The package target creates a portable ZIP containing the emulator, shaders, and
-README. Continuous integration runs the build and tests on Windows and Linux.
+Run the executable:
+
+```bash
+build/emu.exe
+```
+
+## Build on Linux
+
+Ubuntu/Debian:
+
+```bash
+sudo apt update
+sudo apt install build-essential cmake ninja-build python3 \
+  libsdl2-dev libsdl2-ttf-dev libgl-dev
+```
+
+Build and test:
+
+```bash
+cmake -S . -B build -G Ninja
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Linux Libretro cores use the `.so` extension instead of `.dll`.
+
+## Diagnostics
+
+Enable launch logging with:
+
+```bash
+build/emu.exe --verbose
+```
+
+Logs are written to `logs/toaster.log`.
+
+If PS2 shaders fail to compile, update your graphics driver and ensure the
+system supports OpenGL 4.3 or newer.
+
+## Legal notice
+
+Toaster does not include games, BIOS files, firmware, or third-party cores.
+Use only backups and software you are legally permitted to use.
