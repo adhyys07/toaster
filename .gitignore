@@ -44,3 +44,5 @@
 /user-shaders/
 toaster-windows-x64.zip
 __pycache__/
+/services/library_server/*.sqlite
+/services/library_server/*.sqlite-*

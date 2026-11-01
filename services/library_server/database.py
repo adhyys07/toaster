@@ -1,11 +1,15 @@
 import sqlite3
 from pathlib import Path
-
+import threading
 
 class GameDatabase:
     def __init__(self, database_path: str):
-        self.database_path = database_path
-        self.connection = sqlite3.connect(database_path)
+        self.database_path = Path(database_path)
+        self.lock = threading.RLock()
+        self.connection = sqlite3.connect(
+            self.database_path,
+            check_same_thread=False,
+        )
         self.connection.row_factory = sqlite3.Row
         self.create_tables()
 
@@ -40,7 +44,8 @@ class GameDatabase:
         self.connection.commit()
 
     def upsert_game(self, game: dict):
-        self.connection.execute("""
+        with self.lock:
+            self.connection.execute("""
             INSERT INTO games (
                 path,
                 title,
@@ -54,18 +59,14 @@ class GameDatabase:
             ON CONFLICT(path) DO UPDATE SET
                 title = excluded.title,
                 system = excluded.system,
-                extension = excluded.extension
-        """, (
-            game["path"],
-            game["title"],
-            game["system"],
-            game["extension"],
-            game.get("artwork"),
-            int(game.get("favorite", False)),
-            game.get("last_played"),
-        ))
-
-        self.connection.commit()
+                extension = excluded.extension,
+                artwork = excluded.artwork
+            """, (
+                game["path"], game["title"], game["system"],
+                game["extension"], game.get("artwork"),
+                int(game.get("favorite", False)), game.get("last_played"),
+            ))
+            self.connection.commit()
 
     def list_games(self):
         cursor = self.connection.execute("""
@@ -87,32 +88,38 @@ class GameDatabase:
         return [dict(row) for row in cursor.fetchall()]
 
     def set_favorite(self, game_id: int, favorite: bool):
-        self.connection.execute("""
-            UPDATE games
-            SET favorite = ?
-            WHERE id = ?
-        """, (int(favorite), game_id))
-
-        self.connection.commit()
+        with self.lock:
+            cursor = self.connection.execute(
+                "UPDATE games SET favorite = ? WHERE id = ?",
+                (int(favorite), game_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
 
     def mark_played(self, game_id: int, timestamp: int):
-        self.connection.execute("""
-            UPDATE games
-            SET last_played = ?, play_count = play_count + 1
-            WHERE id = ?
-        """, (timestamp, game_id))
-
-        self.connection.commit()
+        with self.lock:
+            cursor = self.connection.execute(
+                """
+                UPDATE games
+                SET last_played = ?, play_count = play_count + 1
+                WHERE id = ?
+                """,
+                (timestamp, game_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
 
     def set_tags(self, game_id: int, tags: list[str]):
         normalized = sorted({
             tag.strip().lower() for tag in tags if tag.strip()
         })
-        self.connection.execute(
-            "UPDATE games SET tags = ? WHERE id = ?",
-            (",".join(normalized), game_id),
-        )
-        self.connection.commit()
+        with self.lock:
+            cursor = self.connection.execute(
+                "UPDATE games SET tags = ? WHERE id = ?",
+                (",".join(normalized), game_id),
+            )
+            self.connection.commit()
+            return cursor.rowcount == 1
 
     def statistics(self):
         systems = self.connection.execute("""

@@ -12,7 +12,9 @@ from scanner import scan_rom_folder
 
 app = FastAPI(title="Toaster Library Service")
 
-database = GameDatabase("toaster-library.sqlite")
+database = GameDatabase(
+    os.environ.get("TOASTER_DATABASE", "toaster-library.sqlite")
+)
 
 class ScanRequest(BaseModel):
     folder: str
@@ -61,6 +63,22 @@ def games(filter: str | None = None):
 def statistics():
     return database.statistics()
 
+@app.get("/games/favorites")
+def favorites():
+    return [
+        game for game in database.list_games()
+        if game["favorite"]
+    ]
+
+@app.get("/games/recent")
+def recent():
+    return sorted(
+        [game for game in database.list_games()
+         if game["last_played"] is not None],
+        key=lambda game: game["last_played"],
+        reverse=True,
+    )
+
 @app.get("/catalog/search")
 def catalog_search(q: str):
     if not q.strip():
@@ -80,17 +98,23 @@ def catalog_search(q: str):
         with urlopen(request, timeout=10) as response:
             payload = response.read().decode("utf-8")
         data = json.loads(payload)
-        return [
+        games = data.get("data", {}).get("games", [])
+        boxart = data.get("include", {}).get("boxart", {})
+        results = [
             {
                 "id": item.get("id"),
                 "title": item.get("game_title", ""),
                 "overview": item.get("overview", ""),
                 "release_date": item.get("release_date", ""),
                 "platform": item.get("platform", ""),
-                "artwork": item.get("boxart", {}).get("thumb"),
+                "artwork": (
+                    boxart.get(str(item.get("id")), {})
+                    .get("thumb", [None])[0]
+                ),
             }
             for item in data.get("data", {}).get("games", [])
         ]
+        return results
     except (OSError, URLError, TimeoutError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=502, detail=str(error))
 
@@ -105,38 +129,26 @@ def game(game_id: int):
 
 @app.post("/games/{game_id}/favorite")
 def favorite(game_id: int, request: FavoriteRequest):
-    database.set_favorite(game_id, request.favorite)
+    if not database.set_favorite(game_id, request.favorite):
+        raise HTTPException(status_code=404, detail="Game not found")
     return {"success": True}
 
 
 @app.post("/games/{game_id}/played")
 def played(game_id: int):
-    database.mark_played(game_id, int(time.time()))
+    if not database.mark_played(game_id, int(time.time())):
+        raise HTTPException(status_code=404, detail="Game not found")
     return {"success": True}
 
 @app.put("/games/{game_id}/tags")
 def tags(game_id: int, request: TagsRequest):
     if database.get_game(game_id) is None:
         raise HTTPException(status_code=404, detail="Game not found")
-    database.set_tags(game_id, request.tags)
-    return {"success": True, "tags": database.get_game(game_id)["tags"].split(",")}
+    if not database.set_tags(game_id, request.tags):
+        raise HTTPException(status_code=404, detail="Game not found")
+    stored_tags = database.get_game(game_id)["tags"]
 
-@app.get("/games/favorites")
-def favorites():
-    return [
-        game for game in database.list_games()
-        if game["favorite"]
-    ]
-
-
-@app.get("/games/recent")
-def recent():
-    games = [
-        game for game in database.list_games()
-        if game["last_played"] is not None
-    ]
-    return sorted(
-        games,
-        key=lambda game: game["last_played"],
-        reverse=True,
-    )
+    return {
+        "success": True,
+        "tags": [tag for tag in stored_tags.split(",") if tag],
+    }

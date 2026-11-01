@@ -604,7 +604,6 @@ std::string showGameMenu(const fs::path& folder,
                     game.title = remote.title;
                     game.favorite = remote.favorite;
                     game.tags = remote.tags;
-                    game.tags = remote.tags;
                     games.push_back(std::move(game));
                 }
                 library_client->getStatistics(library_statistics, library_error);
@@ -684,6 +683,22 @@ std::string showGameMenu(const fs::path& folder,
         if (redraw) {
             const std::vector<GameEntry> visible_games =
                 filterGames(games, search);
+            if (visible_games.empty()) {
+                selected = 0;
+                first_visible = 0;
+            } else {
+                selected = std::min(selected, visible_games.size() - 1);
+                if (visible_games.size() <= visible_rows) {
+                    first_visible = 0;
+                } else {
+                    first_visible = std::min(
+                        first_visible, visible_games.size() - visible_rows);
+                    if (selected < first_visible)
+                        first_visible = selected;
+                    if (selected >= first_visible + visible_rows)
+                        first_visible = selected - visible_rows + 1;
+                }
+            }
             const SDL_Color background{13, 18, 28, 255};
             const SDL_Color panel{22, 30, 44, 255};
             const SDL_Color panel_border{45, 59, 78, 255};

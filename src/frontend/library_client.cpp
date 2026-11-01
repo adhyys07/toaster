@@ -79,6 +79,18 @@ bool request(const std::string& base_url, const std::string& method,
         error = "Could not connect to library server";
         return false;
     }
+#ifdef _WIN32
+    DWORD timeout_ms = 5000;
+    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO,
+               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO,
+               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
+#else
+    timeval timeout{};
+    timeout.tv_sec = 5;
+    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+#endif
     const std::string target = slash == std::string::npos
         ? path : address.substr(slash) + path;
     const std::string message = method + " " + target + " HTTP/1.1\r\nHost: " +
@@ -99,6 +111,11 @@ bool request(const std::string& base_url, const std::string& method,
     int count = 0;
     while ((count = recv(socket_fd, buffer, sizeof(buffer), 0)) > 0)
         response.append(buffer, static_cast<size_t>(count));
+    if (count < 0) {
+        closeSocket(socket_fd);
+        error = "Library server response timed out";
+        return false;
+    }
     closeSocket(socket_fd);
     const auto header_end = response.find("\r\n\r\n");
     const auto status_end = response.find(' ');
