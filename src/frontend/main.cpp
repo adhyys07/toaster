@@ -557,6 +557,7 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
             } else if (pointInside(scaling_button, event.button.x, event.button.y)) {
                 emu::frontend::cycleScaling(settings);
                 redraw = true;
+            }
         }
     }
 
@@ -1137,15 +1138,10 @@ int runGenericGame(const std::string& rom_path,
             settings.audio_device.empty() ? nullptr : settings.audio_device.c_str(),
             0, &wanted, nullptr, 0);
         if (audio) {
-            SDL_SetAudioDeviceVolume(
-                audio, settings.mute
-                    ? 0
-                    : static_cast<Uint8>(
-                        std::clamp(settings.volume, 0, 100) *
-                        SDL_MIX_MAXVOLUME / 100));
             SDL_PauseAudioDevice(audio, 0);
+        } else {
+            std::fprintf(stderr, "Audio unavailable: %s\n", SDL_GetError());
         }
-        else std::fprintf(stderr, "Audio unavailable: %s\n", SDL_GetError());
     }
 
     std::printf("Running %s: %s\n", system->name(), rom_path.c_str());
@@ -1226,25 +1222,10 @@ int runGenericGame(const std::string& rom_path,
                     showDebugInfo(*system);
                 } else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
                     settings.volume = std::max(0, settings.volume - 5);
-                    if (audio) {
-                        SDL_SetAudioDeviceVolume(
-                            audio, settings.mute ? 0 : static_cast<Uint8>(
-                                settings.volume * SDL_MIX_MAXVOLUME / 100));
-                    }
                 } else if (key == SDLK_EQUALS || key == SDLK_KP_PLUS) {
                     settings.volume = std::min(100, settings.volume + 5);
-                    if (audio) {
-                        SDL_SetAudioDeviceVolume(
-                            audio, settings.mute ? 0 : static_cast<Uint8>(
-                                settings.volume * SDL_MIX_MAXVOLUME / 100));
-                    }
                 } else if (key == SDLK_m) {
                     settings.mute = !settings.mute;
-                    if (audio) {
-                        SDL_SetAudioDeviceVolume(
-                            audio, settings.mute ? 0 : static_cast<Uint8>(
-                                settings.volume * SDL_MIX_MAXVOLUME / 100));
-                    }
                 } else if (key >= SDLK_F1 && key <= SDLK_F9) {
                     const int slot = static_cast<int>(key - SDLK_F1) + 1;
                     if (!saveStateToSlot(*system, rom_path, slot)) {
@@ -1376,6 +1357,12 @@ int runGenericGame(const std::string& rom_path,
         if (audio) {
             const size_t count = system->readAudio(audio_buffer.data(), audio_buffer.size());
             if (count > 0) {
+                const float gain = settings.mute
+                    ? 0.0f
+                    : static_cast<float>(std::clamp(settings.volume, 0, 100)) / 100.0f;
+                for (size_t i = 0; i < count; ++i) {
+                    audio_buffer[i] *= gain;
+                }
                 if (SDL_GetQueuedAudioSize(audio) >
                     static_cast<Uint32>(system->sampleRate() * sizeof(float) / 4)) {
                     SDL_ClearQueuedAudio(audio);
@@ -1669,7 +1656,8 @@ int main(int argc, char** argv) {
 
     if (!ps2_game_path.empty()) {
         const int result = emu::ps2::runPs2Game(
-            ps2_core, ps2_game_path, system_directory, fullscreen, mute);
+            ps2_core, ps2_game_path, system_directory, fullscreen, mute,
+            settings);
         SDL_Quit();
         return result;
     }
@@ -1681,13 +1669,13 @@ int main(int argc, char** argv) {
     }
     if (selected_system == SelectedSystem::PS2) {
         const int result = emu::ps2::runPs2Game(
-            ps2_core, rom_path, system_directory, fullscreen, mute);
+            ps2_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();
         return result;
     }
     if (selected_system == SelectedSystem::PSP) {
         const int result = emu::psp::runPspGame(
-            psp_core, rom_path, system_directory, fullscreen, mute);
+            psp_core, rom_path, system_directory, fullscreen, mute, settings);
         SDL_Quit();
         return result;
     }

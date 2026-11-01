@@ -33,7 +33,7 @@ static void exercise(const char* path, const char* expect_core, int w, int h) {
     std::vector<uint8_t> state;
     const bool saved = sys->saveState(state);
     if (std::string(expect_core) == "CHIP-8") {
-        check(state_saved && !state.empty(), "save state is produced");
+        check(saved && !state.empty(), "save state is produced");
         sys->runFrame();
         check(sys->loadState(state), "save state restores successfully");
         check(sys->video().pixels != nullptr, "restored state has a framebuffer");
