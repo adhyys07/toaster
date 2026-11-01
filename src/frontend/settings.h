@@ -1,5 +1,7 @@
 #pragma once
 #include <array>
+#include <string>
+#include <SDL.h>
 
 namespace emu::frontend {
 
@@ -30,6 +32,9 @@ struct Settings {
     bool show_fps = false;
     Upscaler upscaler = Upscaler::Nearest;
     float sharpness = 0.2f;
+    int volume = 100;
+    int audio_buffer_samples = 1024;
+    std::string audio_device;
     ScalingMode scaling = ScalingMode::Aspect;
     std::array<int, kPadActionCount> keyboard_keys{
         SDL_SCANCODE_Z,
@@ -60,5 +65,6 @@ const char* upscalerName(Upscaler mode);
 void cycleUpscaler(Settings& settings);
 const char* scalingName(ScalingMode mode);
 void cycleScaling(Settings& settings);
+void changeVolume(Settings& settings, int delta);
 
 } // namespace emu::frontend

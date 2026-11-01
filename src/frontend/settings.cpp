@@ -60,6 +60,22 @@ Settings loadSettings() {
             settings.show_fps = value == "true" || value == "1";
         } else if (key == "upscaler") {
             settings.upscaler = parseUpscaler(value);
+        } else if (key == "volume") {
+            try {
+                settings.volume = std::clamp(std::stoi(value), 0, 100);
+            } catch (...) {
+                settings.volume = 100;
+            }
+        } else if (key == "audio_buffer_samples") {
+            try {
+                settings.audio_buffer_samples = std::max(256, std::stoi(value));
+            } catch (...) {
+                settings.audio_buffer_samples = 1024;
+            }
+        } else if (key == "audio_device") {
+            settings.audio_device = value;
+        } else if (key == "audio_device") {
+            settings.audio_device = value;
         } else if (key == "scaling") {
             settings.scaling = parseScaling(value);
         } else if (key.rfind("keyboard_key_", 0) == 0) {
@@ -72,8 +88,8 @@ Settings loadSettings() {
                     scancode < SDL_NUM_SCANCODES) {
                     settings.keyboard_keys[index] = scancode;
                 }
-                } catch (...) {
-    }
+            } catch (...) {
+            }
         } else if (key == "sharpness") {
             try {
                 settings.sharpness = std::clamp(std::stof(value), 0.0f, 1.0f);
@@ -104,7 +120,11 @@ bool saveSettings(const Settings& settings) {
          << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
          << "upscaler=" << upscalerValue(settings.upscaler) << '\n'
          << "scaling=" << scalingValue(settings.scaling) << '\n'
-         << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n';
+        << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n'
+        << "volume=" << std::clamp(settings.volume, 0, 100) << '\n'
+        << "audio_buffer_samples="
+        << std::clamp(settings.audio_buffer_samples, 256, 4096) << '\n'
+        << "audio_device=" << settings.audio_device << '\n';
 
     for (int i = 0; i < kPadActionCount; ++i) {
         file << "pad_button_" << i << '=' << settings.pad_buttons[i] << '\n';
@@ -145,6 +165,10 @@ void cycleScaling(Settings& settings) {
     case ScalingMode::Integer: settings.scaling = ScalingMode::Stretch; break;
     case ScalingMode::Stretch: settings.scaling = ScalingMode::Aspect; break;
     }
+}
+
+void changeVolume(Settings& settings, int delta) {
+    settings.volume = std::clamp(settings.volume + delta, 0, 100);
 }
 
 } // namespace emu::frontend

@@ -199,6 +199,15 @@ std::vector<GameEntry> filterGames(const std::vector<GameEntry>& games,
     return filtered;
 }
 
+
+void showDebugInfo(const emu::System& system) {
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION,
+        "Debugger",
+        system.debugInfo().c_str(),
+        nullptr);
+}
+
 void drawMenuText(SDL_Renderer* renderer, TTF_Font* font,
                   const std::string& text, int x, int y,
                   SDL_Color color, int wrap_width = 0) {
@@ -1108,9 +1117,19 @@ int runGenericGame(const std::string& rom_path,
         wanted.freq = system->sampleRate();
         wanted.format = AUDIO_F32SYS;
         wanted.channels = 1;
-        wanted.samples = 1024;
-        audio = SDL_OpenAudioDevice(nullptr, 0, &wanted, nullptr, 0);
-        if (audio) SDL_PauseAudioDevice(audio, 0);
+        wanted.samples = static_cast<Uint16>(std::clamp(settings.audio_buffer_samples, 256, 4096));
+        audio = SDL_OpenAudioDevice(
+            settings.audio_device.empty() ? nullptr : settings.audio_device.c_str(),
+            0, &wanted, nullptr, 0);
+        if (audio) {
+            SDL_SetAudioDeviceVolume(
+                audio, settings.mute
+                    ? 0
+                    : static_cast<Uint8>(
+                        std::clamp(settings.volume, 0, 100) *
+                        SDL_MIX_MAXVOLUME / 100));
+            SDL_PauseAudioDevice(audio, 0);
+        }
         else std::fprintf(stderr, "Audio unavailable: %s\n", SDL_GetError());
     }
 
@@ -1188,6 +1207,29 @@ int runGenericGame(const std::string& rom_path,
                     frame_advance = true;
                 } else if (key == SDLK_TAB) {
                     fast_forward = !fast_forward;
+                } else if (key == SDLK_F12) {
+                    showDebugInfo(*system);
+                } else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
+                    settings.volume = std::max(0, settings.volume - 5);
+                    if (audio) {
+                        SDL_SetAudioDeviceVolume(
+                            audio, settings.mute ? 0 : static_cast<Uint8>(
+                                settings.volume * SDL_MIX_MAXVOLUME / 100));
+                    }
+                } else if (key == SDLK_EQUALS || key == SDLK_KP_PLUS) {
+                    settings.volume = std::min(100, settings.volume + 5);
+                    if (audio) {
+                        SDL_SetAudioDeviceVolume(
+                            audio, settings.mute ? 0 : static_cast<Uint8>(
+                                settings.volume * SDL_MIX_MAXVOLUME / 100));
+                    }
+                } else if (key == SDLK_m) {
+                    settings.mute = !settings.mute;
+                    if (audio) {
+                        SDL_SetAudioDeviceVolume(
+                            audio, settings.mute ? 0 : static_cast<Uint8>(
+                                settings.volume * SDL_MIX_MAXVOLUME / 100));
+                    }
                 } else if (key >= SDLK_F1 && key <= SDLK_F9) {
                     const int slot = static_cast<int>(key - SDLK_F1) + 1;
                     if (!saveStateToSlot(*system, rom_path, slot)) {
@@ -1238,7 +1280,9 @@ int runGenericGame(const std::string& rom_path,
                 if (port == 0 && button_index < emu::frontend::kPadActionCount) {
                     const SDL_Scancode key = static_cast<SDL_Scancode>(
                         settings.keyboard_keys[button_index]);
-                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) { down = true };
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) {
+                        down = true;
+                    }
                 }
 
                 // Common PICO-8 keyboard aliases for its two action buttons.
@@ -1262,10 +1306,6 @@ int runGenericGame(const std::string& rom_path,
                 if (port < static_cast<int>(gamepads.size()) && gamepads[port] &&
                     gamepadButtonDown(gamepads[port], button.name, is_pico8)) {
                     down = true;
-                }
-                if (!paused || frame_advance){
-                    system->runFrame();
-                    frame_advance = false;
                 }
                 if (down) button_state |= button.mask;
                 ++button_index;

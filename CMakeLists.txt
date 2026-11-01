@@ -4,6 +4,10 @@ project(emu LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CPack)
 
+set(CPACK_PACKAGE_NAME "toaster")
+set(CPACK_PACKAGE_VERSION "0.1.0")
+set(CPACK_GENERATOR "ZIP")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -23,7 +27,8 @@ add_library(emu_core
     systems/nes/bus.cpp
     systems/nes/cartridge.cpp
     systems/chip8/chip8.cpp
-    systems/chip8/chip8_vm.cpp)
+    systems/chip8/chip8_vm.cpp
+    systems/gb/game_boy_system.cpp)
 target_include_directories(emu_core PUBLIC src systems/nes systems/chip8)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)

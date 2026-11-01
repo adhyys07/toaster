@@ -1,7 +1,7 @@
 #include "../../src/core/system.h"
 #include "bus.h"
 #include "cartridge.h"
-
+#include <sstream>
 #include <cstring>
 #include <cstdio>
 
@@ -102,6 +102,17 @@ public:
  
     void setInput(int port, uint32_t state) override {
         bus_.setController(port, static_cast<uint8_t>(state));
+    }
+
+    std::string debugInfo() const override {
+        std::ostringstream out;
+        out << "CPU PC: " << std::hex << bus_.cpu.pc << "\n";
+        out << "CPU A:  " << std::hex << static_cast<int>(bus_.cpu.a) << "\n";
+        out << "CPU X:  " << std::hex << static_cast<int>(bus_.cpu.x) << "\n";
+        out << "CPU Y:  " << std::hex << static_cast<int>(bus_.cpu.y) << "\n";
+        out << "CPU P:  " << std::hex << static_cast<int>(bus_.cpu.status) << "\n";
+        out << "CPU SP: " << std::hex << static_cast<int>(bus_.cpu.sp) << "\n";
+        return out.str();
     }
  
 private:
