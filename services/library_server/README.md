@@ -1,4 +1,5 @@
 # Toaster library service
+Toaster library services fetch games lists and ratings from a public server called GamesDB so the player doesn't need to leave the emulator to choose the next game from. For developers please follow the below guide to get your API key and setup this service
 
 Install dependencies and run from this directory:
 
