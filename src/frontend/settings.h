@@ -155,15 +155,6 @@ const char* scalingName(ScalingMode mode);
 void cycleScaling(Settings& settings);
 void changeVolume(Settings& settings, int delta);
 
-inline bool configureVsync(
-    const VideoSettings& settings,
-    std::string& error) {
-    if (SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0) != 0) {
-        error = SDL_GetError();
-        return false;
-    }
-
-    return true;
-}
+bool configureVsync(const VideoSettings& settings, std::string& error);
 
 } // namespace emu::frontend

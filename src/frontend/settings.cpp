@@ -88,33 +88,32 @@ std::vector<std::string> listAudioDevices() {
         if (const char* name = SDL_GetAudioDeviceName(i, 0))
             devices.emplace_back(name);
     }
-
-    SDL_Rect calculateViewport(int window_width, int window_height,
-                               int game_width, int game_height,
-                               const VideoSettings& settings) {
-        if (game_width <= 0 || game_height <= 0)
-            return {0, 0, window_width, window_height};
-
-        int width = window_width;
-        int height = window_height;
-        if (settings.integer_scaling) {
-            const int scale = std::max(
-                1, std::min(window_width / game_width,
-                            window_height / game_height));
-            width = game_width * scale;
-            height = game_height * scale;
-        } else {
-            const double aspect = static_cast<double>(game_width) / game_height;
-            height = static_cast<int>(width / aspect);
-            if (height > window_height) {
-                height = window_height;
-                width = static_cast<int>(height * aspect);
-            }
-        }
-        return {(window_width - width) / 2, (window_height - height) / 2,
-                width, height};
-    }
     return devices;
+}
+
+SDL_Rect calculateViewport(int window_width, int window_height,
+                           int game_width, int game_height,
+                           const VideoSettings& settings) {
+    if (game_width <= 0 || game_height <= 0)
+        return {0, 0, window_width, window_height};
+    int width = window_width;
+    int height = window_height;
+    if (settings.integer_scaling) {
+        const int scale = std::max(
+            1, std::min(window_width / game_width,
+                        window_height / game_height));
+        width = game_width * scale;
+        height = game_height * scale;
+    } else {
+        const double aspect = static_cast<double>(game_width) / game_height;
+        height = static_cast<int>(width / aspect);
+        if (height > window_height) {
+            height = window_height;
+            width = static_cast<int>(height * aspect);
+        }
+    }
+    return {(window_width - width) / 2, (window_height - height) / 2,
+            width, height};
 }
 
 SDL_AudioDeviceID openAudioDevice(
@@ -321,7 +320,7 @@ void applyControllerProfile(
 
     const auto pressed = [controller](int button) {
         return SDL_GameControllerGetButton(
-            controller,
+            const_cast<SDL_GameController*>(controller),
             static_cast<SDL_GameControllerButton>(button)) != 0;
     };
     const auto set = [&joypad_state](unsigned id, bool value) {

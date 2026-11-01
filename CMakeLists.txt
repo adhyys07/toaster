@@ -64,7 +64,11 @@ add_executable(settings_tests
     src/frontend/settings.cpp)
 target_include_directories(settings_tests PRIVATE
     src/frontend systems/psp ${SDL2_INCLUDE_DIRS})
-target_link_libraries(settings_tests PRIVATE ${SDL2_LIBRARIES})
+if(TARGET SDL2::SDL2)
+    target_link_libraries(settings_tests PRIVATE SDL2::SDL2)
+else()
+    target_link_libraries(settings_tests PRIVATE ${SDL2_LIBRARIES})
+endif()
 add_test(NAME settings COMMAND settings_tests)
 
 add_executable(emu

@@ -18,40 +18,6 @@
 #include <string>
 #include <vector>
 
-namespace emu::frontend {
-
-void applyControllerProfile(
-    const ControllerProfile& profile,
-    const SDL_GameController* controller,
-    uint16_t& joypad_state) {
-    if (!controller) return;
-
-    const auto pressed = [controller](int button) {
-        return SDL_GameControllerGetButton(
-            controller,
-            static_cast<SDL_GameControllerButton>(button)) != 0;
-    };
-
-    if (pressed(profile.cross))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_B;
-    if (pressed(profile.circle))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_A;
-    if (pressed(profile.square))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_Y;
-    if (pressed(profile.triangle))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_X;
-    if (pressed(profile.start))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_START;
-    if (pressed(profile.back))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_SELECT;
-    if (pressed(profile.l1))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_L;
-    if (pressed(profile.r1))
-        joypad_state |= 1u << RETRO_DEVICE_ID_JOYPAD_R;
-}
-
-} // namespace emu::frontend
-
 #ifndef GL_FRAMEBUFFER
 #define GL_FRAMEBUFFER 0x8D40
 #define GL_READ_FRAMEBUFFER 0x8CA8
