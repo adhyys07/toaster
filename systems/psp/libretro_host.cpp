@@ -63,6 +63,7 @@ public:
              const std::string& system_name,
              bool fullscreen,
              bool mute,
+             const emu::frontend::Settings& settings,
              std::string& error) {
         if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
             std::fprintf(stderr, "Controller support unavailable: %s\n", SDL_GetError());
@@ -74,6 +75,7 @@ public:
         system_directory_ = system_directory;
         system_name_ = system_name;
         mute_ = mute;
+        settings_ = settings;
         active_ = this;
 
         if (!createWindow(game_path, system_name_, fullscreen, error) ||
@@ -113,6 +115,8 @@ private:
     int16_t right_analog_y_ = 0;
     std::string system_directory_;
     std::string system_name_;
+    std::string base_window_title_;
+    emu::frontend::Settings settings_{};
     std::map<std::string, std::string> core_options_;
     std::vector<int16_t> audio_frames_;
     GLuint framebuffer_ = 0;
@@ -517,8 +521,8 @@ private:
 
         Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
         if (fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-        const std::string title = system_name + " - " + game_path;
-        window_ = SDL_CreateWindow(title.c_str(), SDL_WINDOWPOS_CENTERED,
+        base_window_title_ = system_name + " - " + game_path;
+        window_ = SDL_CreateWindow(base_window_title_.c_str(), SDL_WINDOWPOS_CENTERED,
                                    SDL_WINDOWPOS_CENTERED, 960, 544, flags);
         if (!window_) {
             error = std::string("could not create OpenGL window: ") + SDL_GetError();
@@ -597,8 +601,14 @@ private:
                         info.library_version ? info.library_version : "");
         }
 
+        std::string libretro_game_path = game_path;
+
+        #ifdef _WIN32
+        std::replace(libretro_game_path.begin(), libretro_game_path.end(), '/', '\\');
+        #endif
+
         retro_game_info game{};
-        game.path = game_path.c_str();
+        game.path = libretro_game_path.c_str();
         const bool loaded = api_.load_game(&game);
         if (!loaded) {
             error = "the Libretro core could not load this game";
@@ -698,29 +708,34 @@ private:
                                                (keys[SDL_SCANCODE_I] ? 32768 : 0));
 
         if (controller_) {
-            const auto button = [this](SDL_GameControllerButton id) {
+            const auto button = [this](emu::frontend::PadAction action) {
+                const int index = static_cast<int>(action);
+                if (index < 0 || index >= emu::frontend::kPadActionCount)
+                    return false;
+                const auto id = static_cast<SDL_GameControllerButton>(
+                    settings_.pad_buttons[static_cast<size_t>(index)]);
                 return SDL_GameControllerGetButton(controller_, id) != 0;
             };
             // Xbox-style controller buttons: bottom=A, right=B, left=X, top=Y.
             // Map those positions to Cross, Circle, Square, Triangle.
-            set(RETRO_DEVICE_ID_JOYPAD_B, button(SDL_CONTROLLER_BUTTON_A)); // Cross
-            set(RETRO_DEVICE_ID_JOYPAD_A, button(SDL_CONTROLLER_BUTTON_B)); // Circle
-            set(RETRO_DEVICE_ID_JOYPAD_Y, button(SDL_CONTROLLER_BUTTON_X)); // Square
-            set(RETRO_DEVICE_ID_JOYPAD_X, button(SDL_CONTROLLER_BUTTON_Y)); // Triangle
-            set(RETRO_DEVICE_ID_JOYPAD_START, button(SDL_CONTROLLER_BUTTON_START));
-            set(RETRO_DEVICE_ID_JOYPAD_SELECT, button(SDL_CONTROLLER_BUTTON_BACK));
-            set(RETRO_DEVICE_ID_JOYPAD_UP, button(SDL_CONTROLLER_BUTTON_DPAD_UP));
-            set(RETRO_DEVICE_ID_JOYPAD_DOWN, button(SDL_CONTROLLER_BUTTON_DPAD_DOWN));
-            set(RETRO_DEVICE_ID_JOYPAD_LEFT, button(SDL_CONTROLLER_BUTTON_DPAD_LEFT));
-            set(RETRO_DEVICE_ID_JOYPAD_RIGHT, button(SDL_CONTROLLER_BUTTON_DPAD_RIGHT));
+            set(RETRO_DEVICE_ID_JOYPAD_B, button(emu::frontend::PadCross));
+            set(RETRO_DEVICE_ID_JOYPAD_A, button(emu::frontend::PadCircle));
+            set(RETRO_DEVICE_ID_JOYPAD_Y, button(emu::frontend::PadSquare));
+            set(RETRO_DEVICE_ID_JOYPAD_X, button(emu::frontend::PadTriangle));
+            set(RETRO_DEVICE_ID_JOYPAD_START, button(emu::frontend::PadStart));
+            set(RETRO_DEVICE_ID_JOYPAD_SELECT, button(emu::frontend::PadSelect));
+            set(RETRO_DEVICE_ID_JOYPAD_UP, button(emu::frontend::PadUp));
+            set(RETRO_DEVICE_ID_JOYPAD_DOWN, button(emu::frontend::PadDown));
+            set(RETRO_DEVICE_ID_JOYPAD_LEFT, button(emu::frontend::PadLeft));
+            set(RETRO_DEVICE_ID_JOYPAD_RIGHT, button(emu::frontend::PadRight));
             const Sint16 left_trigger = SDL_GameControllerGetAxis(
                 controller_, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
             const Sint16 right_trigger = SDL_GameControllerGetAxis(
                 controller_, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
             set(RETRO_DEVICE_ID_JOYPAD_L,
-                button(SDL_CONTROLLER_BUTTON_LEFTSHOULDER));
+                button(emu::frontend::PadL1));
             set(RETRO_DEVICE_ID_JOYPAD_R,
-                button(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER));
+                button(emu::frontend::PadR1));
             set(RETRO_DEVICE_ID_JOYPAD_L2, left_trigger > 16000);
             set(RETRO_DEVICE_ID_JOYPAD_R2, right_trigger > 16000);
             constexpr int deadzone = 7000;
@@ -836,6 +851,8 @@ private:
         const Uint64 frequency = SDL_GetPerformanceFrequency();
         const double frame_ticks = frame_duration_ * static_cast<double>(frequency);
         double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
+        Uint64 fps_window_start = SDL_GetPerformanceCounter();
+        unsigned fps_frame_count = 0;
 
         while (!quit_) {
             SDL_Event event;
@@ -888,6 +905,22 @@ private:
             api_.run();
             presentFramebuffer();
             SDL_GL_SwapWindow(window_);
+
+            if (settings_.show_fps) {
+                ++fps_frame_count;
+                const Uint64 fps_now = SDL_GetPerformanceCounter();
+                const double elapsed = static_cast<double>(fps_now - fps_window_start) /
+                                       static_cast<double>(frequency);
+                if (elapsed >= 1.0) {
+                    char fps_title[512];
+                    std::snprintf(fps_title, sizeof(fps_title), "%s | %.1f FPS",
+                                  base_window_title_.c_str(),
+                                  fps_frame_count / elapsed);
+                    SDL_SetWindowTitle(window_, fps_title);
+                    fps_window_start = fps_now;
+                    fps_frame_count = 0;
+                }
+            }
 
             if (audio_device_ && !audio_frames_.empty()) {
                 const Uint32 queued_limit = static_cast<Uint32>(
@@ -976,10 +1009,11 @@ bool LibretroHost::run(const std::string& core_path,
                        const std::string& system_name,
                        bool fullscreen,
                        bool mute,
+                       const emu::frontend::Settings& settings,
                        std::string& error) {
     HostState host;
     return host.run(core_path, game_path, system_directory, system_name,
-                    fullscreen, mute, error);
+                    fullscreen, mute, settings, error);
 }
 
 }  // namespace emu::libretro

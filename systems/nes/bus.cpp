@@ -92,7 +92,7 @@ void Bus::clock() {
                 } else {
                     ppu.oamBytes()[dma_addr_] = dma_data_;
                     dma_addr_++;
-                    if (dma_addr_ == 0) {  // wrapped past 255: all 256 bytes done
+                    if (dma_addr_ == 0) {
                         dma_active_ = false;
                         dma_sync_   = true;
                     }
@@ -109,7 +109,7 @@ void Bus::clock() {
         cpu.nmi();
     }
 
-    if (apu.irq) {
+    if (apu.irq || (cart && cart->irqState())) {
         cpu.irq();
     }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "frontend/settings.h"
+
 #include <string>
 
 namespace emu::libretro {
@@ -12,6 +14,7 @@ public:
              const std::string& system_name,
              bool fullscreen,
              bool mute,
+             const emu::frontend::Settings& settings,
              std::string& error);
 };
 

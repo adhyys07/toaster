@@ -54,7 +54,8 @@ int runPspGame(const std::string& core_path,
                const std::string& game_path,
                const std::string& system_directory,
                bool fullscreen,
-               bool mute) {
+               bool mute,
+               const emu::frontend::Settings& settings) {
     const std::filesystem::path exe_dir = executableDirectory();
     const std::filesystem::path resolved_system =
         resolvePath(system_directory, exe_dir, true);
@@ -83,7 +84,7 @@ int runPspGame(const std::string& core_path,
     emu::libretro::LibretroHost host;
     std::string error;
     if (!host.run(resolved_core.string(), game_path, resolved_system.string(),
-                  "PSP", fullscreen, mute, error)) {
+                  "PSP", fullscreen, mute, settings, error)) {
         std::fprintf(stderr, "PSP error: %s\n", error.c_str());
         return 1;
     }

@@ -334,6 +334,7 @@ void PPU::loadSpritePatterns() {
 
 void PPU::clock() {
     if (scanline_ >= -1 && scanline_ < 240) {
+        if (cycle_ == 260 && rendering() && cart_) cart_->clockScanline();
 
         if (scanline_ == 0 && cycle_ == 0 && odd_frame_ && rendering()) {
             cycle_ = 1;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <SDL.h>
 #include <string>
 
 namespace emu::frontend {
@@ -40,6 +41,8 @@ Settings loadSettings() {
             settings.mute = value == "true" || value == "1";
         } else if (key == "fullscreen") {
             settings.fullscreen = value == "true" || value == "1";
+        } else if (key == "show_fps") {
+            settings.show_fps = value == "true" || value == "1";
         } else if (key == "upscaler") {
             settings.upscaler = parseUpscaler(value);
         } else if (key == "sharpness") {
@@ -48,6 +51,15 @@ Settings loadSettings() {
             } catch (...) {
                 settings.sharpness = 0.2f;
             }
+        } else if (key.rfind("pad_button_", 0) == 0) {
+            try {
+                const int index = std::stoi(key.substr(11));
+                const int button = std::stoi(value);
+                if (index >= 0 && index < kPadActionCount &&
+                    button >= 0 && button < SDL_CONTROLLER_BUTTON_MAX) {
+                    settings.pad_buttons[index] = button;
+                }
+            } catch (...) {}
         }
     }
 
@@ -60,9 +72,13 @@ bool saveSettings(const Settings& settings) {
 
     file << "mute=" << (settings.mute ? "true" : "false") << '\n'
          << "fullscreen=" << (settings.fullscreen ? "true" : "false") << '\n'
+         << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
          << "upscaler=" << upscalerValue(settings.upscaler) << '\n'
          << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n';
 
+    for (int i = 0; i < kPadActionCount; ++i) {
+        file << "pad_button_" << i << '=' << settings.pad_buttons[i] << '\n';
+    }
     return file.good();
 }
 

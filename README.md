@@ -1,7 +1,7 @@
 ## Toaster
 
-Toaster is a retro game emulator with NES and CHIP-8 cores and an optional PSP
-frontend through PPSSPP's Libretro core.
+Toaster is a retro game emulator with NES and CHIP-8 cores and an optional PSP with PS2
+frontend through PPSSPP's and PSPPX Libretro core.
 
 ### PSP setup
 

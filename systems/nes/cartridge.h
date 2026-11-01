@@ -20,6 +20,10 @@ public:
     virtual bool cpuMapWrite(uint16_t addr, uint32_t& mapped, uint8_t data) = 0;
     virtual bool ppuMapRead(uint16_t addr, uint32_t& mapped) = 0;
     virtual bool ppuMapWrite(uint16_t addr, uint32_t& mapped) = 0;
+    virtual void clockScanline() {}
+    virtual bool irqState() const { return false; }
+    virtual bool prgRamEnabled() const { return true; }
+    virtual bool prgRamWritable() const { return true; }
     virtual bool overridesMirroring() const { return false; }
     virtual Mirroring mirroring() const { return Mirroring::Horizontal; }
 protected:
@@ -35,6 +39,8 @@ public:
     bool cpuWrite(uint16_t addr, uint8_t data);
     bool ppuRead(uint16_t addr, uint8_t& data);
     bool ppuWrite(uint16_t addr, uint8_t data);
+    void clockScanline();
+    bool irqState() const;
     Mirroring mirroring() const;
     int mapperId() const { return mapper_id_; }
     bool loaded() const { return mapper_ != nullptr; }

@@ -9,6 +9,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <cmath>
 #include <SDL_ttf.h>
 #include "core/registry.h"
 #include "psp_system.h"
@@ -133,6 +134,40 @@ void drawMenuText(SDL_Renderer* renderer, TTF_Font* font,
     SDL_FreeSurface(surface);
 }
 
+void fillRoundedRect(SDL_Renderer* renderer, const SDL_Rect& rect,
+                     int radius, SDL_Color color) {
+    radius = std::max(0, std::min(radius, std::min(rect.w / 2, rect.h / 2)));
+    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
+
+    for (int y = 0; y < rect.h; ++y) {
+        const int edge_distance = std::min(y, rect.h - 1 - y);
+        int inset = 0;
+
+        if (edge_distance < radius) {
+            const double dy = radius - edge_distance;
+            inset = radius - static_cast<int>(
+                std::sqrt(radius * radius - dy * dy));
+        }
+
+        SDL_RenderDrawLine(renderer,
+                           rect.x + inset, rect.y + y,
+                           rect.x + rect.w - 1 - inset, rect.y + y);
+    }
+}
+
+void drawMenuPanel(SDL_Renderer* renderer, const SDL_Rect& rect,
+                   SDL_Color fill, SDL_Color border, SDL_Color accent) {
+    SDL_SetRenderDrawColor(renderer, fill.r, fill.g, fill.b, fill.a);
+    SDL_RenderFillRect(renderer, &rect);
+
+    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
+    SDL_RenderDrawRect(renderer, &rect);
+
+    SDL_Rect accent_bar{rect.x, rect.y, 4, rect.h};
+    SDL_SetRenderDrawColor(renderer, accent.r, accent.g, accent.b, accent.a);
+    SDL_RenderFillRect(renderer, &accent_bar);
+}
+
 bool pointInside(const SDL_Rect& rect, int x, int y) {
     return x >= rect.x && x < rect.x + rect.w &&
            y >= rect.y && y < rect.y + rect.h;
@@ -143,31 +178,113 @@ void drawMenuButton(SDL_Renderer* renderer, TTF_Font* font,
                     int mouse_x, int mouse_y) {
     const bool hover = pointInside(rect, mouse_x, mouse_y);
 
-    if (hover) {
-        SDL_SetRenderDrawColor(renderer, 100, 122, 140, 255);
-    } else {
-        SDL_SetRenderDrawColor(renderer, 55, 68, 80, 255);
-    }
-    SDL_RenderFillRect(renderer, &rect);
+    const SDL_Color fill = hover
+        ? SDL_Color{65, 119, 151, 255}
+        : SDL_Color{39, 51, 69, 255};
+    const SDL_Color border = hover
+        ? SDL_Color{111, 190, 226, 255}
+        : SDL_Color{69, 85, 106, 255};
 
-    SDL_SetRenderDrawColor(renderer, 150, 165, 178, 255);
+    fillRoundedRect(renderer, rect, 9, fill);
+    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
     SDL_RenderDrawRect(renderer, &rect);
 
     int text_width = 0;
     int text_height = 0;
     TTF_SizeUTF8(font, label.c_str(), &text_width, &text_height);
 
-    const SDL_Color text_color{245, 247, 249, 255};
+    const SDL_Color text_color{242, 246, 252, 255};
     drawMenuText(renderer, font, label,
                  rect.x + (rect.w - text_width) / 2,
                  rect.y + (rect.h - text_height) / 2,
                  text_color);
 }
 
+void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font){
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Controller settings",
+                                 SDL_GetError(), nullptr);
+        return;
+    }
+    SDL_GameControllerEventState(SDL_ENABLE);
+    
+    const char* names[emu::frontend::kPadActionCount] = {
+        "Cross", "Circle", "Square", "Triangle",
+        "Start", "Select", "Up", "Down", "Left", "Right", "L1", "R1"
+    };
+    
+    SDL_Window* window = SDL_CreateWindow(
+        "Controller Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        620, 560, SDL_WINDOW_SHOWN);
+    if (!window) return;
+
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
+    if (!renderer) {
+        SDL_DestroyWindow(window);
+        return;
+    }
+
+    int waiting_for = -1;
+    bool running = truel
+
+    while (running) {
+        SDL_SetRenderDrawColor(renderer, 17, 22, 28, 255);
+        SDL_RenderClear(renderer);
+        drawMenuText(renderer, font, "CONTROLLER BUTTONS", 28, 20,
+                     SDL_Color{233, 216, 166, 255});
+        for (int i = 0; i < emu::frontend::kPadActionCount; ++i) {
+            const int y = 68 + i * 36;
+            const auto button = static_cast<SDL_GameControllerButton>(
+                settings.pad_buttons[i]);
+            const char* button_name = SDL_GameControllerGetStringForButton(button);
+
+            drawMenuText(renderer, font, names[i], 38, y,
+                         SDL_Color{235, 238, 240, 255});
+
+            const std::string label = waiting_for == i
+                ? "Press a controller button..."
+                : (button_name ? button_name : "Unassigned");
+            
+            drawMenuText(renderer, font, label, 300, y,
+                         SDL_Color{233, 216, 166, 255});
+        }
+
+        drawMenuText(renderer, font, "Click a row, then press a controller button. Esc closes.",
+                     28, 518, SDL_Color{160, 170, 180, 255});
+        SDL_RenderPresent(renderer);
+
+        SDL_Event event;
+        if (!SDL_WaitEvent(&event)) continue;
+
+        if (event.type == SDL_QUIT) {
+            running = false;
+        } else if (event.type == SDL_KEYDOWN &&
+                   event.key.keysym.sym == SDLK_ESCAPE) {
+            running = false;
+        } else if (event.type == SDL_MOUSEBUTTONDOWN &&
+                   event.button.button == SDL_BUTTON_LEFT) {
+                    const int mouse_x = (event.button.y - 68) / 36;
+
+                    if (row >= 0 && row < emu::frontend::kPadActionCount) {
+                         waiting_for = row;
+        } else if (event.type == SDL_CONTROLLERBUTTONDOWN && waiting_for >= 0) {
+            settings.pad_buttons[waiting_for] = event.cbutton.button;
+            waiting_for = -1;
+            emu::frontend::saveSettings(settings);
+        }
+    }
+
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
+    }
+}
+
 bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     SDL_Window* window = SDL_CreateWindow(
         "Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        760, 540, SDL_WINDOW_SHOWN);
+        760, 600, SDL_WINDOW_SHOWN);
     if (!window) return false;
 
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
@@ -183,8 +300,12 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     const SDL_Rect upscaler_button{410, 200, 270, 44};
     const SDL_Rect sharpness_down{410, 255, 52, 44};
     const SDL_Rect sharpness_up{628, 255, 52, 44};
-    const SDL_Rect save_button{410, 465, 125, 44};
-    const SDL_Rect cancel_button{555, 465, 125, 44};
+    const SDL_Rect fps_button{410, 310, 270, 44};
+    const SDL_Rect save_button{410, 535, 125, 44};
+    const SDL_Rect cancel_button{555, 535, 125, 44};
+    const SDL_Rect controller_button{60, 535, 250, 44};
+    
+    
 
     bool running = true;
     bool saved = false;
@@ -205,6 +326,9 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
             drawMenuText(renderer, font, "Start fullscreen", 60, 153, white);
             drawMenuText(renderer, font, "Upscaling filter", 60, 208, white);
             drawMenuText(renderer, font, "FSR sharpness", 60, 263, white);
+            drawMenuText(renderer, font, "Show FPS in title", 60, 318, white);
+            drawMenuButton(renderer, font, fps_button,
+               settings.show_fps ? "On" : "Off", mouse_x, mouse_y);
 
             drawMenuButton(renderer, font, mute_button,
                            settings.mute ? "On" : "Off", mouse_x, mouse_y);
@@ -215,19 +339,21 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
                            mouse_x, mouse_y);
             drawMenuButton(renderer, font, sharpness_down, "-", mouse_x, mouse_y);
             drawMenuButton(renderer, font, sharpness_up, "+", mouse_x, mouse_y);
+            drawMenuButton(renderer, font, controller_button,
+                           "Configure Controller", mouse_x, mouse_y);
 
             char sharpness_text[32];
             std::snprintf(sharpness_text, sizeof(sharpness_text), "%.2f",
                           settings.sharpness);
             drawMenuText(renderer, font, sharpness_text, 515, 267, white);
             drawMenuText(renderer, font, "Nearest and Linear use SDL scaling.",
-                         36, 330, muted);
+                         36, 370, muted);
             drawMenuText(renderer, font, "FSR 1 uses OpenGL EASU + RCAS passes.",
-                         36, 357, muted);
-            drawMenuText(renderer, font, "NES core currently supports mappers 0, 1, 2, 3, 7.",
-                         36, 397, muted, 680);
+                         36, 397, muted);
+            drawMenuText(renderer, font, "NES supports mappers 0, 1, 2, 3, 4, 7; MMC3 IRQ timing is approximate.",
+                         36, 435, muted, 680);
             drawMenuText(renderer, font, "PICO-8 still requires a separate compatible core.",
-                         36, 425, muted, 680);
+                         36, 463, muted, 680);
             drawMenuButton(renderer, font, save_button, "Save", mouse_x, mouse_y);
             drawMenuButton(renderer, font, cancel_button, "Cancel", mouse_x, mouse_y);
             SDL_RenderPresent(renderer);
@@ -273,7 +399,12 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
             } else if (pointInside(cancel_button, event.button.x, event.button.y)) {
                 settings = original;
                 running = false;
-            }
+            } else if (pointInside(controller_button, event.button.x, event.button.y)) {
+                showControllerSettingsMenu(settings, font);
+                redraw = true;
+            } else if (pointInside(fps_button, event.button.x, event.button.y)) {
+                settings.show_fps = !settings.show_fps;
+                redraw = true;
         }
     }
 
@@ -282,9 +413,11 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     return saved;
 }
 std::string chooseRomFile();
+bool importPs2Bios(const std::string& system_directory);
 
 std::string showGameMenu(const fs::path& folder,
-                         emu::frontend::Settings& settings) {
+                         emu::frontend::Settings& settings,
+                         const std::string& system_directory) {
     auto games = scanGames(folder);
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
@@ -321,90 +454,127 @@ std::string showGameMenu(const fs::path& folder,
     size_t selected = 0;
     size_t first_visible = 0;
     constexpr int row_height = 34;
-    constexpr int list_top = 112;
-    constexpr size_t visible_rows = 14;
+    constexpr int list_top = 128;
+    constexpr size_t visible_rows = 12;
     const SDL_Rect launch_button{510, 548, 130, 44};
     const SDL_Rect open_button{650, 548, 140, 44};
     const SDL_Rect rescan_button{800, 548, 150, 44};
     const SDL_Rect settings_button{830, 24, 130, 40};
+    const SDL_Rect bios_button{670, 24, 145, 40};
     bool running = true;
     bool redraw = true;
     std::string result;
 
     while (running) {
         if (redraw) {
-            SDL_SetRenderDrawColor(menu_renderer, 17, 22, 28, 255);
+            const SDL_Color background{13, 18, 28, 255};
+            const SDL_Color panel{22, 30, 44, 255};
+            const SDL_Color panel_border{45, 59, 78, 255};
+            const SDL_Color accent{83, 190, 216, 255};
+            const SDL_Color gold{244, 202, 111, 255};
+            const SDL_Color white{235, 241, 249, 255};
+            const SDL_Color muted{143, 158, 178, 255};
+
+            SDL_SetRenderDrawColor(menu_renderer,
+                                   background.r, background.g,
+                                   background.b, background.a);
             SDL_RenderClear(menu_renderer);
 
-            const SDL_Color gold{233, 216, 166, 255};
-            const SDL_Color white{235, 238, 240, 255};
-            const SDL_Color muted{160, 170, 180, 255};
+            TTF_SetFontStyle(font, TTF_STYLE_BOLD);
+            drawMenuText(menu_renderer, font, "TOASTER", 28, 18, accent);
+            TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
+            drawMenuText(menu_renderer, font, "GAME LIBRARY", 28, 48, muted);
 
-            drawMenuText(menu_renderer, font, "GAME LIBRARY",
-                         32, 24, gold);
-            drawMenuText(menu_renderer, font,
-             "Click a game, then Launch. O opens a ROM. Esc quits.",
-             32, 65, muted);
             int mouse_x = 0;
             int mouse_y = 0;
             SDL_GetMouseState(&mouse_x, &mouse_y);
             drawMenuButton(menu_renderer, font, settings_button, "Settings",
                            mouse_x, mouse_y);
+            drawMenuButton(menu_renderer, font, bios_button, "Install PS2 BIOS",
+                           mouse_x, mouse_y);
 
-            SDL_Rect divider{470, 105, 2, 500};
-            SDL_SetRenderDrawColor(menu_renderer, 70, 80, 90, 255);
-            SDL_RenderFillRect(menu_renderer, &divider);
+            const SDL_Rect list_panel{20, 94, 440, 442};
+            const SDL_Rect details_panel{474, 94, 506, 442};
+            drawMenuPanel(menu_renderer, list_panel,
+                          panel, panel_border, accent);
+            drawMenuPanel(menu_renderer, details_panel,
+                          panel, panel_border, gold);
+
+            TTF_SetFontStyle(font, TTF_STYLE_BOLD);
+            drawMenuText(menu_renderer, font, "YOUR GAMES", 36, 102, white);
+            drawMenuText(menu_renderer, font, "GAME DETAILS", 496, 102, white);
+            TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
+
+            const std::string count = std::to_string(games.size()) +
+                (games.size() == 1 ? " game" : " games");
+            drawMenuText(menu_renderer, font, count, 340, 103, muted);
 
             if (games.empty()) {
-                drawMenuText(menu_renderer, font, "No games found",
-                             36, list_top + 10, gold);
+                drawMenuText(menu_renderer, font, "No games found yet",
+                             42, 151, gold);
                 drawMenuText(menu_renderer, font,
-                             "Add NES, CHIP-8, or PSP games to:",
-                             36, list_top + 50, white);
+                             "Add supported games to this folder:",
+                             42, 190, white);
                 drawMenuText(menu_renderer, font, folder.string(),
-                             36, list_top + 80, muted);
-                drawMenuText(menu_renderer, font, "Press R to scan again.",
-                             36, list_top + 120, muted);
-                drawMenuText(menu_renderer, font, "No game selected",
-                             510, 120, muted);
+                             42, 226, muted, 390);
                 drawMenuText(menu_renderer, font,
-                             "Add a supported ROM to the games folder, then press R.",
-                             510, 170, white, 440);
+                             "Press Rescan after adding games.",
+                             42, 278, muted);
+                drawMenuText(menu_renderer, font, "Nothing selected",
+                             500, 154, muted);
             } else {
                 for (size_t row = 0;
                      row < visible_rows && first_visible + row < games.size(); ++row) {
                     const size_t index = first_visible + row;
-                    SDL_Rect item{24, list_top + static_cast<int>(row) * row_height,
-                                  420, row_height - 2};
+                    SDL_Rect item{32, list_top + static_cast<int>(row) * row_height,
+                                  416, row_height - 4};
                     if (index == selected) {
-                        SDL_SetRenderDrawColor(menu_renderer, 75, 91, 105, 255);
-                        SDL_RenderFillRect(menu_renderer, &item);
+                        fillRoundedRect(menu_renderer, item, 7,
+                                        SDL_Color{43, 76, 98, 255});
+                        SDL_Rect marker{item.x, item.y + 5, 3, item.h - 10};
+                        SDL_SetRenderDrawColor(menu_renderer,
+                                               accent.r, accent.g,
+                                               accent.b, accent.a);
+                        SDL_RenderFillRect(menu_renderer, &marker);
                     }
 
                     drawMenuText(menu_renderer, font, games[index].title,
-                                 36, item.y + 5,
-                                 index == selected ? gold : white);
+                                 item.x + 14, item.y + 4,
+                                 index == selected ? gold : white, 385);
                 }
 
                 const GameEntry& game = games[selected];
-                drawMenuText(menu_renderer, font, game.title, 510, 120, gold);
-                drawMenuText(menu_renderer, font, "Developer: " + game.developer,
-                             510, 170, white);
-                drawMenuText(menu_renderer, font, "Year: " + game.year,
-                             510, 210, white);
-                drawMenuText(menu_renderer, font, "Genre: " + game.genre,
-                             510, 250, white);
-                drawMenuText(menu_renderer, font, "Description:", 510, 305, muted);
+                TTF_SetFontStyle(font, TTF_STYLE_BOLD);
+                drawMenuText(menu_renderer, font, game.title, 500, 148, gold, 450);
+                TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
+                drawMenuText(menu_renderer, font,
+                             "Developer  " + game.developer,
+                             500, 204, white, 450);
+                drawMenuText(menu_renderer, font, "Year       " + game.year,
+                             500, 240, white);
+                drawMenuText(menu_renderer, font, "Genre      " + game.genre,
+                             500, 276, white, 450);
+
+                SDL_Rect separator{500, 316, 450, 1};
+                SDL_SetRenderDrawColor(menu_renderer,
+                                       panel_border.r, panel_border.g,
+                                       panel_border.b, panel_border.a);
+                SDL_RenderFillRect(menu_renderer, &separator);
+                drawMenuText(menu_renderer, font, "DESCRIPTION",
+                             500, 336, muted);
                 drawMenuText(menu_renderer, font, game.description,
-                             510, 340, white, 440);
+                             500, 370, white, 445);
             }
 
             drawMenuButton(menu_renderer, font, launch_button, "Launch",
                            mouse_x, mouse_y);
-            drawMenuButton(menu_renderer, font, open_button, "Open ROM",
+            drawMenuButton(menu_renderer, font, open_button, "Open Game",
                            mouse_x, mouse_y);
             drawMenuButton(menu_renderer, font, rescan_button, "Rescan",
                            mouse_x, mouse_y);
+            drawMenuText(menu_renderer, font,
+                         "Click to select. Double-click or press Enter to launch.",
+                         28, 602, muted, 820);
 
             SDL_RenderPresent(menu_renderer);
             redraw = false;
@@ -444,6 +614,10 @@ std::string showGameMenu(const fs::path& folder,
                     showSettingsMenu(settings, font);
                     redraw = true;
                     break;
+                case SDLK_b:
+                    importPs2Bios(system_directory);
+                    redraw = true;
+                    break;
                 case SDLK_o: {
                     const std::string chosen_rom = chooseRomFile();
                     if (!chosen_rom.empty()) {
@@ -473,6 +647,12 @@ std::string showGameMenu(const fs::path& folder,
 
                 if (pointInside(settings_button, event.button.x, event.button.y)) {
                     showSettingsMenu(settings, font);
+                    redraw = true;
+                    break;
+                }
+
+                if (pointInside(bios_button, event.button.x, event.button.y)) {
+                    importPs2Bios(system_directory);
                     redraw = true;
                     break;
                 }
@@ -580,6 +760,8 @@ bool gamepadButtonDown(SDL_GameController* controller,
     return false;
 }
 
+
+
 SDL_Scancode nesPlayerTwoKey(const char* button_name) {
     const std::string name = normalizedButtonName(button_name);
 
@@ -621,7 +803,8 @@ int runGenericGame(const std::string& rom_path,
         return EXIT_FAILURE;
     }
 
-    std::string title = std::string(system->name()) + " - " + rom_path;
+    const std::string base_title = std::string(system->name()) + " - " + rom_path;
+    std::string title = base_title;
 
     const bool use_fsr = settings.upscaler == emu::frontend::Upscaler::Fsr1;
     if (use_fsr) {
@@ -746,6 +929,8 @@ int runGenericGame(const std::string& rom_path,
     const Uint64 performance_frequency = SDL_GetPerformanceFrequency();
     const double target_frame_ticks = static_cast<double>(performance_frequency) / refresh;
     double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
+    Uint64 fps_window_start = SDL_GetPerformanceCounter();
+    unsigned fps_frame_count = 0;
 
     std::array<SDL_GameController*, 2> gamepads{};
     const bool gamecontroller_ready =
@@ -882,6 +1067,21 @@ int runGenericGame(const std::string& rom_path,
             SDL_RenderPresent(renderer);
         }
 
+        if (settings.show_fps) {
+            ++fps_frame_count;
+            const Uint64 fps_now = SDL_GetPerformanceCounter();
+            const double elapsed = static_cast<double>(fps_now - fps_window_start) /
+                                   static_cast<double>(performance_frequency);
+            if (elapsed >= 1.0) {
+                char fps_title[512];
+                std::snprintf(fps_title, sizeof(fps_title), "%s | %.1f FPS",
+                              base_title.c_str(), fps_frame_count / elapsed);
+                SDL_SetWindowTitle(window, fps_title);
+                fps_window_start = fps_now;
+                fps_frame_count = 0;
+            }
+        }
+
         if (audio) {
             const size_t count = system->readAudio(audio_buffer.data(), audio_buffer.size());
             if (count > 0) {
@@ -943,6 +1143,99 @@ std::string chooseRomFile() {
     std::fprintf(stderr, "The ROM picker is currently implemented for Windows only.\n");
 #endif
     return {};
+}
+
+bool importPs2Bios(const std::string& system_directory) {
+#ifdef _WIN32
+    char filename[32768] = {};
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFilter =
+        "PS2 BIOS images (*.bin;*.rom;*.bios)\0*.bin;*.rom;*.bios\0"
+        "All files\0*.*\0";
+    dialog.lpstrFile = filename;
+    dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = "Select a PS2 BIOS dump you own";
+
+    if (!GetOpenFileNameA(&dialog)) return false;
+
+    std::error_code error;
+    const fs::path source = fs::absolute(fs::path(filename), error);
+    if (error || !fs::is_regular_file(source, error) || error) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
+                                 "The selected file could not be read.", nullptr);
+        return false;
+    }
+
+    fs::path base_path;
+    if (char* raw_base = SDL_GetBasePath()) {
+        base_path = raw_base;
+        SDL_free(raw_base);
+    }
+
+    const fs::path requested_system(system_directory);
+    std::vector<fs::path> candidates{requested_system};
+    if (!requested_system.is_absolute() && !base_path.empty()) {
+        candidates.push_back(base_path / requested_system);
+        candidates.push_back(base_path.parent_path() / requested_system);
+    }
+
+    fs::path system_root;
+    for (const fs::path& candidate : candidates) {
+        error.clear();
+        if (fs::is_directory(candidate, error) && !error) {
+            system_root = candidate;
+            break;
+        }
+    }
+    if (system_root.empty()) {
+        system_root = requested_system.is_absolute()
+            ? requested_system
+            : (base_path.empty() ? fs::current_path() : base_path) / requested_system;
+    }
+
+    const fs::path bios_directory = system_root / "pcsx2" / "bios";
+    error.clear();
+    fs::create_directories(bios_directory, error);
+    if (error) {
+        const std::string message = "Could not create the BIOS folder:\n" +
+                                    bios_directory.string() + "\n\n" + error.message();
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
+                                 message.c_str(), nullptr);
+        return false;
+    }
+
+    const fs::path destination = bios_directory / source.filename();
+    error.clear();
+    if (fs::equivalent(source, destination, error) && !error) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
+                                 "That BIOS file is already in the emulator's BIOS folder.",
+                                 nullptr);
+        return true;
+    }
+
+    error.clear();
+    fs::copy_file(source, destination, fs::copy_options::overwrite_existing, error);
+    if (error) {
+        const std::string message = "Could not copy the BIOS file:\n" + error.message();
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
+                                 message.c_str(), nullptr);
+        return false;
+    }
+
+    const std::string message = "BIOS imported to:\n" + destination.string() +
+        "\n\nRestart the game if it is already running.";
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
+                             message.c_str(), nullptr);
+    return true;
+#else
+    (void)system_directory;
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
+        "Use the system file picker to copy your legally dumped BIOS into "
+        "system/pcsx2/bios.", nullptr);
+    return false;
+#endif
 }
 
 enum class SelectedSystem {
@@ -1068,7 +1361,7 @@ int main(int argc, char** argv) {
     }
 
     if (rom_path.empty() && ps2_game_path.empty()) {
-        rom_path = showGameMenu(games_folder, settings);
+        rom_path = showGameMenu(games_folder, settings, system_directory);
         mute = settings.mute;
         fullscreen = settings.fullscreen;
         if (rom_path.empty()) {

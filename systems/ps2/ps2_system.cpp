@@ -49,7 +49,8 @@ int runPs2Game(const std::string& core_path,
                const std::string& game_path,
                const std::string& system_directory,
                bool fullscreen,
-               bool mute) {
+               bool mute,
+               const emu::frontend::Settings& settings) {
     namespace fs = std::filesystem;
 
     const fs::path exe_dir = executableDirectory();
@@ -81,11 +82,42 @@ int runPs2Game(const std::string& core_path,
         return 1;
     }
 
+    // LRPS2 can treat an absolute Windows ELF path as relative to its ELF
+    // directory. Run with the game's directory as CWD and give the core only
+    // the filename so its own path resolution stays inside that directory.
+    std::error_code cwd_error;
+    const fs::path original_directory = fs::current_path(cwd_error);
+    if (cwd_error) {
+        std::fprintf(stderr, "PS2 error: cannot get current directory: %s\n",
+                     cwd_error.message().c_str());
+        return 1;
+    }
+
+    fs::current_path(resolved_game.parent_path(), cwd_error);
+    if (cwd_error) {
+        std::fprintf(stderr, "PS2 error: cannot enter game directory: %s\n",
+                     cwd_error.message().c_str());
+        return 1;
+    }
+
     emu::libretro::LibretroHost host;
     std::string error;
-    if (!host.run(resolved_core.string(), resolved_game.string(),
-                  resolved_system.string(), "PS2", fullscreen, mute, error)) {
+    const bool loaded = host.run(
+        resolved_core.string(),
+        resolved_game.filename().string(),
+        resolved_system.string(), "PS2", fullscreen, mute, settings, error);
+
+    std::error_code restore_error;
+    fs::current_path(original_directory, restore_error);
+
+    if (!loaded) {
         std::fprintf(stderr, "PS2 error: %s\n", error.c_str());
+        return 1;
+    }
+    if (restore_error) {
+        std::fprintf(stderr,
+                     "PS2 warning: could not restore the original working directory: %s\n",
+                     restore_error.message().c_str());
         return 1;
     }
     return 0;
