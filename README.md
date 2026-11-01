@@ -7,11 +7,7 @@ frontends through native and Libretro cores.
 
 The Game Library has an **Install Cores** button. It downloads Windows x64
 core DLLs from a static HTTPS directory into the executable's `cores` folder.
-The default URL is a placeholder, so configure your server URL when launching:
-
-```text
-build/emu.exe --core-server "https://downloads.example.com/toaster/cores"
-```
+It automatically fetches a file from a private server and install it automatically in few clicks.
 
 The server directory must contain these exact files:
 
@@ -21,16 +17,10 @@ ppsspp_libretro.dll
 pcsx2_libretro.dll
 ```
 
-For example, with nginx, place the files in
-`/var/www/toaster/cores/`, enable HTTPS, and verify:
+The installer downloads emulator cores only.
 
-```text
-https://downloads.example.com/toaster/cores/swanstation_libretro.dll
-```
-
-The installer downloads emulator cores only. BIOS files are not downloaded
-from a server; import legally dumped BIOS files locally using the PS1/PS2 BIOS
-buttons in the Game Library.
+### BIOS Setup
+For BIOS, unfortunately we cannot provide BIOS files on server as they are private property but you can always install one from other websites and directly import them in the engine.
 
 ### PS1 setup
 
@@ -47,6 +37,8 @@ build/emu.exe --ps1-core "D:/toaster/cores/swanstation_libretro.dll" --system-di
 
 `.cue`, `.chd`, and `.pbp` images may be supported by the selected core.
 Use a `.cue` file together with its referenced `.bin` tracks when possible.
+
+<h2>FOR DEVELOPERS</h2>
 
 ### PSP setup
 

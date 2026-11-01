@@ -512,8 +512,9 @@ private:
                       const std::string& system_name,
                       bool fullscreen,
                       std::string& error) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        const bool needs_modern_gl = system_name == "PS2";
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, needs_modern_gl ? 4 : 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, needs_modern_gl ? 3 : 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
         SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
         SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
@@ -531,7 +532,8 @@ private:
 
         gl_context_ = SDL_GL_CreateContext(window_);
         if (!gl_context_) {
-            error = std::string("could not create OpenGL 3.3 context: ") + SDL_GetError();
+            error = std::string("could not create OpenGL ") +
+                (needs_modern_gl ? "4.3" : "3.3") + " context: " + SDL_GetError();
             return false;
         }
         if (SDL_GL_MakeCurrent(window_, gl_context_) != 0) {

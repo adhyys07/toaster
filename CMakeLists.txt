@@ -87,7 +87,6 @@ set(CPACK_PACKAGE_VERSION "0.1.0")
 set(CPACK_GENERATOR "ZIP")
 
 if(WIN32)
-    target_link_libraries(emu PRIVATE urlmon)
     # Find the actual import library path so MinGW links libopengl32.a instead
     # of passing the MSVC-style name "opengl32.lib" to its linker.
     find_library(OPENGL32_LIBRARY NAMES opengl32)

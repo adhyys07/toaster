@@ -25,7 +25,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commdlg.h>
-#include <urlmon.h>
 #endif
 
 namespace {
@@ -1470,7 +1469,7 @@ std::string chooseRomFile() {
     return {};
 }
 
-bool importPs1Bios(const std::string& system_directory) {\
+bool importPs1Bios(const std::string& system_directory) {
 #ifdef _WIN32
     char filename[32768] = {};
     OPENFILENAMEA dialog{};
@@ -1739,8 +1738,17 @@ bool installCoreFiles(const std::string& server_url) {
     for (const std::string& filename : files) {
         const std::string url = base_url + "/" + filename;
         const fs::path destination = core_directory / filename;
-        const HRESULT result = URLDownloadToFileA(
-            nullptr, url.c_str(), destination.string().c_str(), 0, nullptr);
+        using UrlDownloadToFileFn = HRESULT (*)(
+            void*, const char*, const char*, unsigned long, void*);
+        HMODULE urlmon = LoadLibraryA("urlmon.dll");
+        const auto download = urlmon
+            ? reinterpret_cast<UrlDownloadToFileFn>(
+                GetProcAddress(urlmon, "URLDownloadToFileA"))
+            : nullptr;
+        const HRESULT result = download
+            ? download(nullptr, url.c_str(), destination.string().c_str(), 0, nullptr)
+            : E_FAIL;
+        if (urlmon) FreeLibrary(urlmon);
         if (FAILED(result)) {
             SDL_ShowSimpleMessageBox(
                 SDL_MESSAGEBOX_ERROR, "Core installation",

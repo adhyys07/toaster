@@ -19,6 +19,10 @@
 /system/pcsx2/
 /cores/
 
+# BIOS files imported from locally owned hardware
+/system/swanstation/bios/
+/system/pcsx2/bios/
+
 # Additional PS2 disc-image formats
 *.ciso
 *.zso
