@@ -30,6 +30,17 @@ static void exercise(const char* path, const char* expect_core, int w, int h) {
     f = sys->video();
     check(f.pixels != nullptr, "produces a framebuffer after running");
 
+    std::vector<uint8_t> state;
+    const bool state_saved = sys->saveState(state);
+    if (std::string(expect_core) == "CHIP-8") {
+        check(state_saved && !state.empty(), "save state is produced");
+        sys->runFrame();
+        check(sys->loadState(state), "save state restores successfully");
+        check(sys->video().pixels != nullptr, "restored state has a framebuffer");
+    } else {
+        check(!state_saved, "unsupported cores reject save states explicitly");
+    }
+
     std::vector<float> buf(4096);
     size_t got = sys->readAudio(buf.data(), buf.size());
     check(got <= buf.size(), "audio drain respects the caller's buffer");

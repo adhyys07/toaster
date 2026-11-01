@@ -3,6 +3,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 
 namespace nes {
 bool Mapper000::cpuMapRead(uint16_t addr, uint32_t&mapped, uint8_t&) {
@@ -313,6 +314,7 @@ bool Cartridge::load(const std::string& path, std::string& error) {
     if (header.flags6 & 0x04) file.seekg(512, std::ios::cur);
 
     mapper_id_ = ((header.flags7 >> 4) << 4) | (header.flags6 >> 4);
+    battery_ = (header.flags6 & 0x02) != 0;
 
     if (header.flags6 & 0x08)      mirroring_ = Mirroring::FourScreen;
     else if (header.flags6 & 0x01) mirroring_ = Mirroring::Vertical;
@@ -361,6 +363,28 @@ bool Cartridge::load(const std::string& path, std::string& error) {
 
     mapper_->reset();
     return true;
+}
+
+bool Cartridge::loadBatterySave(const std::string& rom_path) {
+    if (!battery_) return true;
+    const std::filesystem::path path =
+        std::filesystem::path(rom_path).replace_extension(".sav");
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return true;
+    file.read(reinterpret_cast<char*>(prg_ram_.data()),
+              static_cast<std::streamsize>(prg_ram_.size()));
+    return file.good() || file.eof();
+}
+
+bool Cartridge::saveBatterySave(const std::string& rom_path) const {
+    if (!battery_) return true;
+    const std::filesystem::path path =
+        std::filesystem::path(rom_path).replace_extension(".sav");
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+    file.write(reinterpret_cast<const char*>(prg_ram_.data()),
+               static_cast<std::streamsize>(prg_ram_.size()));
+    return file.good();
 }
 
 void Cartridge::reset() {

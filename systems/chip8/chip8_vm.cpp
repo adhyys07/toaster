@@ -2,6 +2,23 @@
 
 #include <algorithm>
 #include <fstream>
+#include <cstring>
+
+namespace {
+template <typename T>
+void appendState(std::vector<uint8_t>& out, const T& value) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+    out.insert(out.end(), bytes, bytes + sizeof(T));
+}
+
+template <typename T>
+bool readState(const std::vector<uint8_t>& in, size_t& offset, T& value) {
+    if (offset + sizeof(T) > in.size()) return false;
+    std::memcpy(&value, in.data() + offset, sizeof(T));
+    offset += sizeof(T);
+    return true;
+}
+}
 #include <iterator>
 #include <utility>
 
@@ -64,6 +81,46 @@ void Chip8::setKey(uint8_t key, bool pressed) {
 void Chip8::tick60Hz() {
     if (delay_timer_) --delay_timer_;
     if (sound_timer_) --sound_timer_;
+}
+
+bool Chip8::saveState(std::vector<uint8_t>& out) const {
+    out.clear();
+    const uint32_t version = 1;
+    appendState(out, version);
+    appendState(out, memory_);
+    appendState(out, v_);
+    appendState(out, stack_);
+    appendState(out, keys_);
+    appendState(out, display_);
+    appendState(out, pc_);
+    appendState(out, index_);
+    appendState(out, sp_);
+    appendState(out, delay_timer_);
+    appendState(out, sound_timer_);
+    appendState(out, draw_flag_);
+    appendState(out, random_state_);
+    return true;
+}
+
+bool Chip8::loadState(const std::vector<uint8_t>& in) {
+    size_t offset = 0;
+    uint32_t version = 0;
+    if (!readState(in, offset, version) || version != 1) return false;
+    if (!readState(in, offset, memory_) ||
+        !readState(in, offset, v_) ||
+        !readState(in, offset, stack_) ||
+        !readState(in, offset, keys_) ||
+        !readState(in, offset, display_) ||
+        !readState(in, offset, pc_) ||
+        !readState(in, offset, index_) ||
+        !readState(in, offset, sp_) ||
+        !readState(in, offset, delay_timer_) ||
+        !readState(in, offset, sound_timer_) ||
+        !readState(in, offset, draw_flag_) ||
+        !readState(in, offset, random_state_)) {
+        return false;
+    }
+    return offset == in.size();
 }
 
 uint8_t Chip8::randomByte() {

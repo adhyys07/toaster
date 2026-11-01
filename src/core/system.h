@@ -51,7 +51,7 @@ public:
     virtual bool saveState(std::vector<uint8_t>& out) const { (void)out; return false; }
     virtual bool loadState(const std::vector<uint8_t>& in) { (void)in; return false; }
 };
- 
+
 using SystemPtr = std::unique_ptr<System>;
  
 }

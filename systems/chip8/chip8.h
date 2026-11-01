@@ -16,6 +16,8 @@ public:
     void reset();
     bool step();
     void tick60Hz();
+    bool saveState(std::vector<uint8_t>& out) const;
+    bool loadState(const std::vector<uint8_t>& in);
     void setKey(uint8_t key, bool pressed);
     const std::array<uint8_t, kDisplayWidth * kDisplayHeight>& display() const { return display_; }
     void clearDrawFlag() { draw_flag_ = false; }

@@ -43,3 +43,17 @@ build/emu.exe --ps2-core "D:/toaster/cores/pcsx2_libretro.dll" --system-dir "D:/
 
 From the game library, shared formats such as `.iso`, `.cso`, `.chd`, and `.elf`
 prompt you to choose PSP or PS2. PS2-only formats are routed to LRPS2.
+
+### Build, test, and package
+
+Configure and build with CMake:
+
+```text
+cmake -S . -B build
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake --build build --target package
+```
+
+The package target creates a portable ZIP containing the emulator, shaders, and
+README. Continuous integration runs the build and tests on Windows and Linux.

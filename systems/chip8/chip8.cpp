@@ -35,6 +35,12 @@ public:
     }
 
     void reset() override { vm_.reset(); }
+    bool saveState(std::vector<uint8_t>& out) const override {
+        return vm_.saveState(out);
+    }
+    bool loadState(const std::vector<uint8_t>& in) override {
+        return vm_.loadState(in);
+    }
 
     void runFrame() override {
         for (int i = 0; i < cycles_per_frame_; ++i) {

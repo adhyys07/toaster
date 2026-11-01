@@ -1,6 +1,7 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <cstdio>
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <set>
 #include <algorithm>
 #include <cmath>
 #include <SDL_ttf.h>
@@ -54,7 +56,65 @@ struct GameEntry
     std::string year = "Unknown";
     std::string genre = "Unknown";
     std::string description = "No description provided.";
+    bool favorite = false;
 };
+
+std::string gamePathKey(const fs::path& path) {
+    std::error_code error;
+    const fs::path absolute = fs::absolute(path, error);
+    return (error ? path : absolute).lexically_normal().string();
+}
+
+std::set<std::string> loadFavorites() {
+    std::set<std::string> favorites;
+    std::ifstream file("favorites.txt");
+    std::string path;
+    while (std::getline(file, path)) {
+        if (!path.empty()) favorites.insert(path);
+    }
+    return favorites;
+}
+
+bool saveFavorites(const std::vector<GameEntry>& games) {
+    std::ofstream file("favorites.txt", std::ios::trunc);
+    if (!file) return false;
+
+    for (const GameEntry& game : games) {
+        if (game.favorite) {
+            file << gamePathKey(game.path) << '\n';
+        }
+    }
+    return file.good();
+}
+
+bool saveStateToSlot(const emu::System& system,
+                     const std::string& rom_path,
+                     int slot) {
+    std::vector<uint8_t> state;
+    if (!system.saveState(state)) return false;
+    fs::path path = fs::path(rom_path);
+    path.replace_extension(
+        ".slot" + std::to_string(slot) + ".state");
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file) return false;
+
+    file.write(reinterpret_cast<const char*>(state.data()),
+               static_cast<std::streamsize>(state.size()));
+    return file.good();
+}
+
+bool loadStateFromSlot(emu::System& system,
+                       const std::string& rom_path,
+                       int slot) {
+    fs::path path = fs::path(rom_path);
+    path.replace_extension(
+        ".slot" + std::to_string(slot) + ".state");
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return false;
+    std::vector<uint8_t> state(
+        std::istreambuf_iterator<char>(file), {});
+    return system.loadState(state);
+}
 
 GameEntry readGameEntry(const fs::path& romPath) {
     GameEntry game;
@@ -84,10 +144,11 @@ GameEntry readGameEntry(const fs::path& romPath) {
 std::vector<GameEntry> scanGames(const fs::path& folder) {
     std::vector<GameEntry> games;
     std::error_code error;
+    const std::set<std::string> favorites = loadFavorites();
 
     if (!fs::exists(folder, error) || error) return games;
 
-    for (const auto& item : fs::directory_iterator(folder, error)) {
+    for (const auto& item : fs::recursive_directory_iterator(folder, error)) {
         if (error) break;
         if (!item.is_regular_file()) continue;
 
@@ -103,7 +164,10 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
             extension == ".bin" || extension == ".m3u" || extension == ".ciso" ||
             extension == ".zso" || extension == ".mdf" || extension == ".nrg" ||
             extension == ".dump" || extension == ".img") {
-            games.push_back(readGameEntry(item.path()));
+            GameEntry game = readGameEntry(item.path());
+            game.favorite =
+                favorites.count(gamePathKey(game.path)) != 0;
+            games.push_back(std::move(game));
         }
     }
 
@@ -113,6 +177,26 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
         });
 
     return games;
+}
+
+std::vector<GameEntry> filterGames(const std::vector<GameEntry>& games,
+                                   const std::string& query) {
+    if (query.empty()) return games;
+
+    std::string wanted = query;
+    std::transform(wanted.begin(), wanted.end(), wanted.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    std::vector<GameEntry> filtered;
+    for (const GameEntry& game : games) {
+        std::string title = game.title;
+        std::transform(title.begin(), title.end(), title.begin(),
+            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        if (title.find(wanted) != std::string::npos) {
+            filtered.push_back(game);
+        }
+    }
+    return filtered;
 }
 
 void drawMenuText(SDL_Renderer* renderer, TTF_Font* font,
@@ -173,6 +257,32 @@ bool pointInside(const SDL_Rect& rect, int x, int y) {
            y >= rect.y && y < rect.y + rect.h;
 }
 
+SDL_Rect calculateViewport(int window_width, int window_height,
+                           int video_width, int video_height,
+                           double aspect_ratio,
+                           emu::frontend::ScalingMode mode) {
+    if (mode == emu::frontend::ScalingMode::Stretch) {
+        return {0, 0, window_width, window_height};
+    }
+
+    double scale = std::min(
+        static_cast<double>(window_width) / video_width,
+        static_cast<double>(window_height) / video_height);
+    if (mode == emu::frontend::ScalingMode::Integer) {
+        scale = std::max(1.0, std::floor(scale));
+    }
+
+    int width = static_cast<int>(video_width * scale);
+    int height = static_cast<int>(width / aspect_ratio);
+    if (height > window_height) {
+        height = window_height;
+        width = static_cast<int>(height * aspect_ratio);
+    }
+
+    return {(window_width - width) / 2, (window_height - height) / 2,
+            width, height};
+}
+
 void drawMenuButton(SDL_Renderer* renderer, TTF_Font* font,
                     const SDL_Rect& rect, const std::string& label,
                     int mouse_x, int mouse_y) {
@@ -226,7 +336,7 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
     }
 
     int waiting_for = -1;
-    bool running = truel
+    bool running = true;
 
     while (running) {
         SDL_SetRenderDrawColor(renderer, 17, 22, 28, 255);
@@ -248,6 +358,11 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
             
             drawMenuText(renderer, font, label, 300, y,
                          SDL_Color{233, 216, 166, 255});
+            const SDL_Scancode key = static_cast<SDL_Scancode>(
+                settings.keyboard_keys[i]);
+            drawMenuText(renderer, font,
+                         SDL_GetScancodeName(key), 470, y,
+                         SDL_Color{160, 170, 180, 255});
         }
 
         drawMenuText(renderer, font, "Click a row, then press a controller button. Esc closes.",
@@ -264,10 +379,16 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
             running = false;
         } else if (event.type == SDL_MOUSEBUTTONDOWN &&
                    event.button.button == SDL_BUTTON_LEFT) {
-                    const int mouse_x = (event.button.y - 68) / 36;
-
-                    if (row >= 0 && row < emu::frontend::kPadActionCount) {
-                         waiting_for = row;
+            const int row = (event.button.y - 68) / 36;
+            if (event.button.y >= 68 && row >= 0 &&
+                row < emu::frontend::kPadActionCount) {
+                waiting_for = row;
+            }
+        } else if (event.type == SDL_KEYDOWN && waiting_for >= 0 &&
+                   event.key.keysym.sym != SDLK_ESCAPE) {
+            settings.keyboard_keys[waiting_for] = event.key.keysym.scancode;
+            waiting_for = -1;
+            emu::frontend::saveSettings(settings);
         } else if (event.type == SDL_CONTROLLERBUTTONDOWN && waiting_for >= 0) {
             settings.pad_buttons[waiting_for] = event.cbutton.button;
             waiting_for = -1;
@@ -278,7 +399,6 @@ void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* fon
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-    }
 }
 
 bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
@@ -301,6 +421,7 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     const SDL_Rect sharpness_down{410, 255, 52, 44};
     const SDL_Rect sharpness_up{628, 255, 52, 44};
     const SDL_Rect fps_button{410, 310, 270, 44};
+    const SDL_Rect scaling_button{410, 365, 270, 44};
     const SDL_Rect save_button{410, 535, 125, 44};
     const SDL_Rect cancel_button{555, 535, 125, 44};
     const SDL_Rect controller_button{60, 535, 250, 44};
@@ -327,6 +448,7 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
             drawMenuText(renderer, font, "Upscaling filter", 60, 208, white);
             drawMenuText(renderer, font, "FSR sharpness", 60, 263, white);
             drawMenuText(renderer, font, "Show FPS in title", 60, 318, white);
+            drawMenuText(renderer, font, "Screen scaling", 60, 373, white);
             drawMenuButton(renderer, font, fps_button,
                settings.show_fps ? "On" : "Off", mouse_x, mouse_y);
 
@@ -336,6 +458,9 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
                            settings.fullscreen ? "On" : "Off", mouse_x, mouse_y);
             drawMenuButton(renderer, font, upscaler_button,
                            emu::frontend::upscalerName(settings.upscaler),
+                           mouse_x, mouse_y);
+            drawMenuButton(renderer, font, scaling_button,
+                           emu::frontend::scalingName(settings.scaling),
                            mouse_x, mouse_y);
             drawMenuButton(renderer, font, sharpness_down, "-", mouse_x, mouse_y);
             drawMenuButton(renderer, font, sharpness_up, "+", mouse_x, mouse_y);
@@ -405,6 +530,9 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
             } else if (pointInside(fps_button, event.button.x, event.button.y)) {
                 settings.show_fps = !settings.show_fps;
                 redraw = true;
+            } else if (pointInside(scaling_button, event.button.x, event.button.y)) {
+                emu::frontend::cycleScaling(settings);
+                redraw = true;
         }
     }
 
@@ -464,9 +592,13 @@ std::string showGameMenu(const fs::path& folder,
     bool running = true;
     bool redraw = true;
     std::string result;
+    std::string search;
+    bool search_active = false;
 
     while (running) {
         if (redraw) {
+            const std::vector<GameEntry> visible_games =
+                filterGames(games, search);
             const SDL_Color background{13, 18, 28, 255};
             const SDL_Color panel{22, 30, 44, 255};
             const SDL_Color panel_border{45, 59, 78, 255};
@@ -505,11 +637,15 @@ std::string showGameMenu(const fs::path& folder,
             drawMenuText(menu_renderer, font, "GAME DETAILS", 496, 102, white);
             TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
 
-            const std::string count = std::to_string(games.size()) +
-                (games.size() == 1 ? " game" : " games");
+            const std::string count = std::to_string(visible_games.size()) +
+                (visible_games.size() == 1 ? " game" : " games");
             drawMenuText(menu_renderer, font, count, 340, 103, muted);
+            drawMenuText(menu_renderer, font,
+                         search_active ? "Search: " + search
+                                       : "Press / to search",
+                         36, 76, search_active ? gold : muted, 400);
 
-            if (games.empty()) {
+            if (visible_games.empty()) {
                 drawMenuText(menu_renderer, font, "No games found yet",
                              42, 151, gold);
                 drawMenuText(menu_renderer, font,
@@ -524,7 +660,8 @@ std::string showGameMenu(const fs::path& folder,
                              500, 154, muted);
             } else {
                 for (size_t row = 0;
-                     row < visible_rows && first_visible + row < games.size(); ++row) {
+                     row < visible_rows &&
+                     first_visible + row < visible_games.size(); ++row) {
                     const size_t index = first_visible + row;
                     SDL_Rect item{32, list_top + static_cast<int>(row) * row_height,
                                   416, row_height - 4};
@@ -538,12 +675,15 @@ std::string showGameMenu(const fs::path& folder,
                         SDL_RenderFillRect(menu_renderer, &marker);
                     }
 
-                    drawMenuText(menu_renderer, font, games[index].title,
+                    const std::string label =
+                        (visible_games[index].favorite ? "* " : "  ") +
+                        visible_games[index].title;
+                    drawMenuText(menu_renderer, font, label,
                                  item.x + 14, item.y + 4,
                                  index == selected ? gold : white, 385);
                 }
 
-                const GameEntry& game = games[selected];
+                const GameEntry& game = visible_games[selected];
                 TTF_SetFontStyle(font, TTF_STYLE_BOLD);
                 drawMenuText(menu_renderer, font, game.title, 500, 148, gold, 450);
                 TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
@@ -564,6 +704,9 @@ std::string showGameMenu(const fs::path& folder,
                              500, 336, muted);
                 drawMenuText(menu_renderer, font, game.description,
                              500, 370, white, 445);
+                drawMenuText(menu_renderer, font,
+                             game.favorite ? "Favorite" : "Not a favorite",
+                             500, 470, game.favorite ? gold : muted);
             }
 
             drawMenuButton(menu_renderer, font, launch_button, "Launch",
@@ -573,7 +716,7 @@ std::string showGameMenu(const fs::path& folder,
             drawMenuButton(menu_renderer, font, rescan_button, "Rescan",
                            mouse_x, mouse_y);
             drawMenuText(menu_renderer, font,
-                         "Click to select. Double-click or press Enter to launch.",
+                         "F toggles favorite. / searches. Double-click or Enter launches.",
                          28, 602, muted, 820);
 
             SDL_RenderPresent(menu_renderer);
@@ -584,6 +727,8 @@ std::string showGameMenu(const fs::path& folder,
         if (!SDL_WaitEvent(&event)) continue;
 
         do {
+            const std::vector<GameEntry> visible_games =
+                filterGames(games, search);
             switch (event.type) {
             case SDL_QUIT:
                 running = false;
@@ -594,14 +739,53 @@ std::string showGameMenu(const fs::path& folder,
             case SDL_KEYDOWN:
                 switch (event.key.keysym.sym) {
                 case SDLK_ESCAPE:
-                    running = false;
+                    if (search_active) {
+                        search.clear();
+                        search_active = false;
+                        SDL_StopTextInput();
+                        selected = 0;
+                        first_visible = 0;
+                        redraw = true;
+                    } else {
+                        running = false;
+                    }
+                    break;
+                case SDLK_BACKSPACE:
+                    if (search_active && !search.empty()) {
+                        search.pop_back();
+                        selected = 0;
+                        first_visible = 0;
+                        redraw = true;
+                    }
+                    break;
+                case SDLK_SLASH:
+                    search_active = true;
+                    SDL_StartTextInput();
+                    redraw = true;
+                    break;
+                case SDLK_f:
+                    if (!visible_games.empty()) {
+                        const std::string path =
+                            gamePathKey(visible_games[selected].path);
+                        for (GameEntry& game : games) {
+                            if (gamePathKey(game.path) == path) {
+                                game.favorite = !game.favorite;
+                                break;
+                            }
+                        }
+                        if (!saveFavorites(games)) {
+                            std::fprintf(stderr,
+                                         "Could not save favorites\n");
+                        }
+                        redraw = true;
+                    }
                     break;
                 case SDLK_UP:
-                    if (selected > 0) --selected;
+                    if (selected > 0 && !visible_games.empty()) --selected;
                     redraw = true;
                     break;
                 case SDLK_DOWN:
-                    if (selected + 1 < games.size()) ++selected;
+                    if (selected + 1 < visible_games.size()) ++selected;
                     redraw = true;
                     break;
                 case SDLK_r:
@@ -628,8 +812,8 @@ std::string showGameMenu(const fs::path& folder,
                 }
                 case SDLK_RETURN:
                 case SDLK_KP_ENTER:
-                    if (!games.empty()) {
-                        result = games[selected].path.string();
+                    if (!visible_games.empty()) {
+                        result = visible_games[selected].path.string();
                         running = false;
                     }
                 break;
@@ -638,9 +822,19 @@ std::string showGameMenu(const fs::path& folder,
                 }
                 break;
             case SDL_MOUSEWHEEL:
-                if (event.wheel.y > 0 && selected > 0) --selected;
-                if (event.wheel.y < 0 && selected + 1 < games.size()) ++selected;
+                if (event.wheel.y > 0 && selected > 0 &&
+                    !visible_games.empty()) --selected;
+                if (event.wheel.y < 0 &&
+                    selected + 1 < visible_games.size()) ++selected;
                 redraw = true;
+                break;
+            case SDL_TEXTINPUT:
+                if (search_active) {
+                    search += event.text.text;
+                    selected = 0;
+                    first_visible = 0;
+                    redraw = true;
+                }
                 break;
             case SDL_MOUSEBUTTONDOWN:
                 if (event.button.button != SDL_BUTTON_LEFT) break;
@@ -658,8 +852,8 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(launch_button, event.button.x, event.button.y)) {
-                    if (!games.empty()) {
-                        result = games[selected].path.string();
+                    if (!visible_games.empty()) {
+                        result = visible_games[selected].path.string();
                         running = false;
                     }
                     break;
@@ -688,11 +882,11 @@ std::string showGameMenu(const fs::path& folder,
                     const size_t row = static_cast<size_t>(
                         (event.button.y - list_top) / row_height);
                     const size_t index = first_visible + row;
-                    if (index < games.size()) {
+                    if (index < visible_games.size()) {
                         selected = index;
                         redraw = true;
                         if (event.button.clicks >= 2) {
-                            result = games[index].path.string();
+                            result = visible_games[index].path.string();
                             running = false;
                         }
                     }
@@ -931,6 +1125,9 @@ int runGenericGame(const std::string& rom_path,
     double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
     Uint64 fps_window_start = SDL_GetPerformanceCounter();
     unsigned fps_frame_count = 0;
+    bool paused = false;
+    bool frame_advance = false;
+    bool fast_forward = false;
 
     std::array<SDL_GameController*, 2> gamepads{};
     const bool gamecontroller_ready =
@@ -983,6 +1180,30 @@ int runGenericGame(const std::string& rom_path,
                         is_fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
                     std::fprintf(stderr, "Could not toggle fullscreen: %s\n", SDL_GetError());
                 }
+            } else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
+                const SDL_Keycode key = event.key.keysym.sym;
+                if (key == SDLK_p) {
+                    paused = !paused;
+                } else if (key == SDLK_n && paused) {
+                    frame_advance = true;
+                } else if (key == SDLK_TAB) {
+                    fast_forward = !fast_forward;
+                } else if (key >= SDLK_F1 && key <= SDLK_F9) {
+                    const int slot = static_cast<int>(key - SDLK_F1) + 1;
+                    if (!saveStateToSlot(*system, rom_path, slot)) {
+                        std::fprintf(stderr,
+                                     "Save state slot %d is unsupported or failed\n",
+                                     slot);
+                    }
+                } else if (key >= SDLK_1 && key <= SDLK_9 &&
+                           (event.key.keysym.mod & KMOD_CTRL)) {
+                    const int slot = static_cast<int>(key - SDLK_1) + 1;
+                    if (!loadStateFromSlot(*system, rom_path, slot)) {
+                        std::fprintf(stderr,
+                                     "Load state slot %d is unsupported or failed\n",
+                                     slot);
+                    }
+                }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                 // Added events carry a device index.
                 openGamepad(event.cdevice.which);
@@ -1008,15 +1229,16 @@ int runGenericGame(const std::string& rom_path,
         for (int port = 0; port < system->portCount(); ++port) {
             uint32_t button_state = 0;
 
+            int button_index = 0;
             for (const emu::ButtonInfo& button : system->buttons()) {
                 bool down = false;
                 const std::string button_name = normalizedButtonName(button.name);
 
                 // Player 1 uses the keyboard bindings declared by the core.
-                if (port == 0 && button.default_key) {
-                    const SDL_Scancode key =
-                        SDL_GetScancodeFromName(button.default_key);
-                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) down = true;
+                if (port == 0 && button_index < emu::frontend::kPadActionCount) {
+                    const SDL_Scancode key = static_cast<SDL_Scancode>(
+                        settings.keyboard_keys[button_index]);
+                    if (key != SDL_SCANCODE_UNKNOWN && keyboard[key]) { down = true };
                 }
 
                 // Common PICO-8 keyboard aliases for its two action buttons.
@@ -1041,14 +1263,21 @@ int runGenericGame(const std::string& rom_path,
                     gamepadButtonDown(gamepads[port], button.name, is_pico8)) {
                     down = true;
                 }
-
+                if (!paused || frame_advance){
+                    system->runFrame();
+                    frame_advance = false;
+                }
                 if (down) button_state |= button.mask;
+                ++button_index;
             }
 
             system->setInput(port, button_state);
         }
 
-        system->runFrame();
+        if (!paused || frame_advance) {
+            system->runFrame();
+            frame_advance = false;
+        }
         if (use_fsr) {
             if (!fsr.render(system->video(), system->aspectRatio(),
                             settings.sharpness, error)) {
@@ -1063,7 +1292,14 @@ int runGenericGame(const std::string& rom_path,
             }
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
             SDL_RenderClear(renderer);
-            SDL_RenderCopy(renderer, texture, nullptr, nullptr);
+            int window_width = 0;
+            int window_height = 0;
+            SDL_GetWindowSize(window, &window_width, &window_height);
+            const emu::VideoFrame frame = system->video();
+            const SDL_Rect viewport = calculateViewport(
+                window_width, window_height, frame.width, frame.height,
+                system->aspectRatio(), settings.scaling);
+            SDL_RenderCopy(renderer, texture, nullptr, &viewport);
             SDL_RenderPresent(renderer);
         }
 
@@ -1094,7 +1330,10 @@ int runGenericGame(const std::string& rom_path,
             }
         }
 
-        next_frame += target_frame_ticks;
+        const double speed_multiplier = fast_forward ? 4.0 : 1.0;
+        next_frame += target_frame_ticks / speed_multiplier;
+
+        next_frame += target_frame_ticks / (fast_forward ? 4.0 : 1.0);
         const double now = static_cast<double>(SDL_GetPerformanceCounter());
         if (next_frame > now) {
             const Uint32 delay_ms = static_cast<Uint32>(

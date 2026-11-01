@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(emu LANGUAGES C CXX)
 
+include(GNUInstallDirs)
+include(CPack)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,6 +62,17 @@ add_custom_command(TARGET emu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
             "$<TARGET_FILE_DIR:emu>/assets/shaders")
+
+install(TARGETS emu RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY assets/shaders
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
+install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+set(CPACK_PACKAGE_NAME "toaster")
+set(CPACK_PACKAGE_VENDOR "Toaster")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A small retro game emulator")
+set(CPACK_PACKAGE_VERSION "0.1.0")
+set(CPACK_GENERATOR "ZIP")
 
 if(WIN32)
     # Find the actual import library path so MinGW links libopengl32.a instead

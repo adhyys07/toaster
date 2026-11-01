@@ -3,6 +3,7 @@
 #include "cartridge.h"
 
 #include <cstring>
+#include <cstdio>
 
 namespace emu {
 namespace{
@@ -26,6 +27,12 @@ public:
     audio_.reserve(kSampleRate / 30);
   }
 
+  ~NesSystem() override {
+      if (!rom_path_.empty() && !cart_.saveBatterySave(rom_path_)) {
+          std::fprintf(stderr, "Could not save NES battery RAM\n");
+      }
+  }
+
   const char* name() const override { return "NES"; }
   std::string romInfo() const override {
         if (!cart_.loaded()) return {};
@@ -37,6 +44,11 @@ public:
 
     bool loadRom(const std::string& path, std::string& error) override {
         if (!cart_.load(path, error)) return false;
+        if (!cart_.loadBatterySave(path)) {
+            error = "could not load NES battery save";
+            return false;
+        }
+        rom_path_ = path;
         bus_.insertCartridge(&cart_);
         bus_.reset();
         audio_.clear();
@@ -98,6 +110,7 @@ private:
     std::vector<ButtonInfo> buttons_;
     std::vector<float>      audio_;
     double audio_accum_ = 0.0;
+    std::string rom_path_;
 };
 }
 

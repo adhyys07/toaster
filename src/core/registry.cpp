@@ -9,11 +9,13 @@ namespace emu {
  
 SystemPtr createNesSystem();
 SystemPtr createChip8System();
+SystemPtr createGameBoySystem();
  
 const std::vector<CoreInfo>& registeredCores() {
     static const std::vector<CoreInfo> cores = {
         { "NES",     { "nes" },         createNesSystem   },
         { "CHIP-8",  { "ch8", "c8" },   createChip8System },
+        {"GAME BOY", { "gb" },          createGameBoySystem },
     };
     return cores;
 }

@@ -18,12 +18,33 @@ enum class Upscaler {
     Fsr1
 };
 
+enum class ScalingMode {
+    Stretch,
+    Integer,
+    Aspect
+};
+
 struct Settings {
     bool mute = false;
     bool fullscreen = false;
     bool show_fps = false;
     Upscaler upscaler = Upscaler::Nearest;
     float sharpness = 0.2f;
+    ScalingMode scaling = ScalingMode::Aspect;
+    std::array<int, kPadActionCount> keyboard_keys{
+        SDL_SCANCODE_Z,
+        SDL_SCANCODE_X,
+        SDL_SCANCODE_A,
+        SDL_SCANCODE_S,
+        SDL_SCANCODE_RETURN,
+        SDL_SCANCODE_RSHIFT,
+        SDL_SCANCODE_UP,
+        SDL_SCANCODE_DOWN,
+        SDL_SCANCODE_LEFT,
+        SDL_SCANCODE_RIGHT,
+        SDL_SCANCODE_Q,
+        SDL_SCANCODE_W
+};
 
     std::array<int, kPadActionCount> pad_buttons{
         0, 1, 2, 3,       // A, B, X, Y
@@ -37,5 +58,7 @@ Settings loadSettings();
 bool saveSettings(const Settings& settings);
 const char* upscalerName(Upscaler mode);
 void cycleUpscaler(Settings& settings);
+const char* scalingName(ScalingMode mode);
+void cycleScaling(Settings& settings);
 
 } // namespace emu::frontend

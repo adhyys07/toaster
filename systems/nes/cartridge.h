@@ -47,6 +47,8 @@ public:
     size_t prgSize() const { return prg_.size(); }
     size_t chrSize() const { return chr_.size(); }
     bool chrIsRam() const { return chr_is_ram_; }
+    bool loadBatterySave(const std::string& rom_path);
+    bool saveBatterySave(const std::string& rom_path) const;
 private:
     std::vector<uint8_t> prg_;
     std::vector<uint8_t> chr_;
@@ -55,6 +57,7 @@ private:
     Mirroring mirroring_ = Mirroring::Horizontal;
     int mapper_id_ = 0;
     bool chr_is_ram_ = false;
+    bool battery_ = false;
 };
 
 }  // namespace nes

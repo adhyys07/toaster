@@ -23,6 +23,21 @@ const char* upscalerValue(Upscaler mode) {
     }
 }
 
+ScalingMode parseScaling(const std::string& value) {
+    if (value == "stretch") return ScalingMode::Stretch;
+    if (value == "integer") return ScalingMode::Integer;
+    return ScalingMode::Aspect;
+}
+
+const char* scalingValue(ScalingMode mode) {
+    switch (mode) {
+    case ScalingMode::Stretch: return "stretch";
+    case ScalingMode::Integer: return "integer";
+    case ScalingMode::Aspect:
+    default: return "aspect";
+    }
+}
+
 } // namespace
 
 Settings loadSettings() {
@@ -45,6 +60,20 @@ Settings loadSettings() {
             settings.show_fps = value == "true" || value == "1";
         } else if (key == "upscaler") {
             settings.upscaler = parseUpscaler(value);
+        } else if (key == "scaling") {
+            settings.scaling = parseScaling(value);
+        } else if (key.rfind("keyboard_key_", 0) == 0) {
+            try {
+                const int index = std::stoi(key.substr(13));
+                const int scancode = std::stoi(value);
+
+                if (index >= 0 && index < kPadActionCount &&
+                    scancode >= 0 &&
+                    scancode < SDL_NUM_SCANCODES) {
+                    settings.keyboard_keys[index] = scancode;
+                }
+                } catch (...) {
+    }
         } else if (key == "sharpness") {
             try {
                 settings.sharpness = std::clamp(std::stof(value), 0.0f, 1.0f);
@@ -74,10 +103,12 @@ bool saveSettings(const Settings& settings) {
          << "fullscreen=" << (settings.fullscreen ? "true" : "false") << '\n'
          << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
          << "upscaler=" << upscalerValue(settings.upscaler) << '\n'
+         << "scaling=" << scalingValue(settings.scaling) << '\n'
          << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n';
 
     for (int i = 0; i < kPadActionCount; ++i) {
         file << "pad_button_" << i << '=' << settings.pad_buttons[i] << '\n';
+        file << "keyboard_key_" << i << '=' << settings.keyboard_keys[i] << '\n';
     }
     return file.good();
 }
@@ -96,6 +127,23 @@ void cycleUpscaler(Settings& settings) {
     case Upscaler::Nearest: settings.upscaler = Upscaler::Linear; break;
     case Upscaler::Linear:  settings.upscaler = Upscaler::Fsr1; break;
     case Upscaler::Fsr1:    settings.upscaler = Upscaler::Nearest; break;
+    }
+}
+
+const char* scalingName(ScalingMode mode) {
+    switch (mode) {
+    case ScalingMode::Stretch: return "Stretch";
+    case ScalingMode::Integer: return "Integer";
+    case ScalingMode::Aspect:
+    default: return "Aspect";
+    }
+}
+
+void cycleScaling(Settings& settings) {
+    switch (settings.scaling) {
+    case ScalingMode::Aspect: settings.scaling = ScalingMode::Integer; break;
+    case ScalingMode::Integer: settings.scaling = ScalingMode::Stretch; break;
+    case ScalingMode::Stretch: settings.scaling = ScalingMode::Aspect; break;
     }
 }
 
