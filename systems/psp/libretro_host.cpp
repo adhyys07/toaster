@@ -340,15 +340,22 @@ private:
 
     static void RETRO_CALLCONV audioSample(int16_t left, int16_t right) {
         if (!active_ || active_->mute_) return;
-        active_->audio_frames_.push_back(left);
-        active_->audio_frames_.push_back(right);
+        active_->audio_frames_.push_back(
+            emu::frontend::scaleAudioSample(left, active_->settings_.volume));
+        active_->audio_frames_.push_back(
+            emu::frontend::scaleAudioSample(right, active_->settings_.volume));
     }
 
     static size_t RETRO_CALLCONV audioSampleBatch(const int16_t* samples,
                                                    size_t frames) {
         if (!active_ || active_->mute_ || !samples) return frames;
-        active_->audio_frames_.insert(active_->audio_frames_.end(),
-                                      samples, samples + frames * 2);
+        const size_t count = frames * 2;
+        const size_t old_size = active_->audio_frames_.size();
+        active_->audio_frames_.insert(active_->audio_frames_.end(), samples,
+                                      samples + count);
+        emu::frontend::applyAudioVolume(
+            active_->audio_frames_.data() + old_size, count,
+            active_->settings_.volume);
         return frames;
     }
 
@@ -586,7 +593,12 @@ private:
                 return false;
             }
         }
-        SDL_GL_SetSwapInterval(1);
+        emu::frontend::VideoSettings video_settings;
+        video_settings.vsync = settings_.vsync;
+        std::string vsync_error;
+        if (!emu::frontend::configureVsync(video_settings, vsync_error))
+            std::fprintf(stderr, "%s: %s\n", system_name_.c_str(),
+                         vsync_error.c_str());
         SDL_GL_GetDrawableSize(window_, &drawable_width_, &drawable_height_);
         return true;
     }
@@ -694,13 +706,12 @@ private:
         const double fps = av.timing.fps > 1.0 ? av.timing.fps : 60.0;
         frame_duration_ = 1.0 / fps;
         if (av.timing.sample_rate > 0.0 && !mute_) {
-            wanted_audio_spec_ = {};
-            wanted_audio_spec_.freq = static_cast<int>(av.timing.sample_rate);
-            wanted_audio_spec_.format = AUDIO_S16SYS;
-            wanted_audio_spec_.channels = 2;
-            wanted_audio_spec_.samples = 2048;
-            audio_device_ = SDL_OpenAudioDevice(nullptr, 0, &wanted_audio_spec_,
-                                                 &obtained_audio_spec_, 0);
+            emu::frontend::AudioSettings audio_settings;
+            audio_settings.volume = settings_.volume;
+            audio_settings.buffer_samples = settings_.audio_buffer_samples;
+            audio_settings.device = settings_.audio_device;
+            audio_device_ = emu::frontend::openAudioDevice(
+                audio_settings, wanted_audio_spec_, obtained_audio_spec_);
             if (audio_device_) SDL_PauseAudioDevice(audio_device_, 0);
             else std::fprintf(stderr, "%s audio unavailable: %s\n",
                               system_name_.c_str(), SDL_GetError());
@@ -912,6 +923,13 @@ private:
                         const bool current = (SDL_GetWindowFlags(window_) &
                             SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
                         SDL_SetWindowFullscreen(window_, current ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                    }
+                    if (event.key.keysym.scancode == SDL_SCANCODE_M) {
+                        mute_ = !mute_;
+                    } else if (event.key.keysym.scancode == SDL_SCANCODE_MINUS) {
+                        settings_.volume = std::max(0, settings_.volume - 5);
+                    } else if (event.key.keysym.scancode == SDL_SCANCODE_EQUALS) {
+                        settings_.volume = std::min(100, settings_.volume + 5);
                     }
                 } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                     openController();

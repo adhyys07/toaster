@@ -4,6 +4,8 @@
 #include <SDL.h>
 #include <cstdint>
 #include <filesystem>
+#include <vector>
+#include <cstddef>
 
 namespace emu::frontend {
 
@@ -32,6 +34,7 @@ struct Settings {
     bool mute = false;
     bool fullscreen = false;
     bool show_fps = false;
+    bool vsync = true;
     Upscaler upscaler = Upscaler::Nearest;
     float sharpness = 0.2f;
     int volume = 100;
@@ -71,14 +74,31 @@ struct GameSettings {
     int fast_forward_speed = 2;
 };
 
+enum class VideoShader {
+    None,
+    Nearest,
+    Bilinear,
+    Fsr
+};
+
+struct AudioSettings {
+    bool muted = false;
+    int volume = 100;
+    int buffer_samples = 1024;
+    std::string device;
+};
+
 struct VideoSettings {
     bool vsync = true;
-    bool integer_scale = true;
-    bool bilinear_filter = false;
+    bool integer_scaling = true;
     bool fullscreen = false;
     bool show_fps = false;
-    int scale = 2;
+    VideoShader shader = VideoShader::None;
 };
+
+SDL_Rect calculateViewport(int window_width, int window_height,
+                           int game_width, int game_height,
+                           const VideoSettings& settings);
 
 struct ControllerProfile {
     std::string name = "Default";
@@ -110,6 +130,15 @@ private:
                   std::string& error) const;
 };
 
+int16_t scaleAudioSample(int16_t sample, int volume);
+void applyAudioVolume(int16_t* samples, size_t sample_count, int volume);
+void applyMute(int16_t* samples, size_t sample_count, bool muted);
+std::vector<std::string> listAudioDevices();
+SDL_AudioDeviceID openAudioDevice(
+    const AudioSettings& settings,
+    SDL_AudioSpec& desired,
+    SDL_AudioSpec& obtained);
+
 void applyControllerProfile(
     const ControllerProfile& profile,
     const SDL_GameController* controller,
@@ -126,7 +155,15 @@ const char* scalingName(ScalingMode mode);
 void cycleScaling(Settings& settings);
 void changeVolume(Settings& settings, int delta);
 
-bool configureVsync(const VideoSettings& settings,
-                    std::string& error);
+inline bool configureVsync(
+    const VideoSettings& settings,
+    std::string& error) {
+    if (SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0) != 0) {
+        error = SDL_GetError();
+        return false;
+    }
+
+    return true;
+}
 
 } // namespace emu::frontend

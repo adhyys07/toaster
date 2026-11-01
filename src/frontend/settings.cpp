@@ -65,6 +65,72 @@ void writeControllerButton(std::ofstream& file,
 
 } // namespace
 
+int16_t scaleAudioSample(int16_t sample, int volume) {
+    const int scaled = static_cast<int>(
+        static_cast<float>(sample) * std::clamp(volume, 0, 100) / 100.0f);
+    return static_cast<int16_t>(std::clamp(scaled, -32768, 32767));
+}
+
+void applyAudioVolume(int16_t* samples, size_t sample_count, int volume) {
+    if (!samples) return;
+    for (size_t i = 0; i < sample_count; ++i)
+        samples[i] = scaleAudioSample(samples[i], volume);
+}
+
+void applyMute(int16_t* samples, size_t sample_count, bool muted) {
+    if (muted && samples) std::fill(samples, samples + sample_count, 0);
+}
+
+std::vector<std::string> listAudioDevices() {
+    std::vector<std::string> devices;
+    const int count = SDL_GetNumAudioDevices(0);
+    for (int i = 0; i < count; ++i) {
+        if (const char* name = SDL_GetAudioDeviceName(i, 0))
+            devices.emplace_back(name);
+    }
+
+    SDL_Rect calculateViewport(int window_width, int window_height,
+                               int game_width, int game_height,
+                               const VideoSettings& settings) {
+        if (game_width <= 0 || game_height <= 0)
+            return {0, 0, window_width, window_height};
+
+        int width = window_width;
+        int height = window_height;
+        if (settings.integer_scaling) {
+            const int scale = std::max(
+                1, std::min(window_width / game_width,
+                            window_height / game_height));
+            width = game_width * scale;
+            height = game_height * scale;
+        } else {
+            const double aspect = static_cast<double>(game_width) / game_height;
+            height = static_cast<int>(width / aspect);
+            if (height > window_height) {
+                height = window_height;
+                width = static_cast<int>(height * aspect);
+            }
+        }
+        return {(window_width - width) / 2, (window_height - height) / 2,
+                width, height};
+    }
+    return devices;
+}
+
+SDL_AudioDeviceID openAudioDevice(
+    const AudioSettings& settings,
+    SDL_AudioSpec& desired,
+    SDL_AudioSpec& obtained) {
+    desired = {};
+    desired.freq = 48000;
+    desired.format = AUDIO_S16SYS;
+    desired.channels = 2;
+    desired.samples = static_cast<Uint16>(
+        std::clamp(settings.buffer_samples, 256, 4096));
+    const char* device = settings.device.empty() ? nullptr : settings.device.c_str();
+    return SDL_OpenAudioDevice(device, 0, &desired, &obtained, 0);
+}
+
 GameSettings loadGameSettings(const std::string& game_path) {
     GameSettings settings;
     std::ifstream file(game_path + ".ini");
@@ -291,6 +357,8 @@ Settings loadSettings() {
             settings.fullscreen = value == "true" || value == "1";
         } else if (key == "show_fps") {
             settings.show_fps = value == "true" || value == "1";
+        } else if (key == "vsync") {
+            settings.vsync = value == "true" || value == "1";
         } else if (key == "upscaler") {
             settings.upscaler = parseUpscaler(value);
         } else if (key == "volume") {
@@ -351,6 +419,7 @@ bool saveSettings(const Settings& settings) {
     file << "mute=" << (settings.mute ? "true" : "false") << '\n'
          << "fullscreen=" << (settings.fullscreen ? "true" : "false") << '\n'
          << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
+         << "vsync=" << (settings.vsync ? "true" : "false") << '\n'
          << "upscaler=" << upscalerValue(settings.upscaler) << '\n'
          << "scaling=" << scalingValue(settings.scaling) << '\n'
         << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n'

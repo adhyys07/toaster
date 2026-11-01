@@ -40,3 +40,5 @@
 
 /logs/
 *.state
+/user-shaders/
+/user-shaders/
