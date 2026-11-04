@@ -7,6 +7,12 @@ namespace emu::gb {
 
 class CPU {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit(a_); visit(f_); visit(b_); visit(c_);
+        visit(d_); visit(e_); visit(h_); visit(l_);
+        visit(pc_); visit(sp_); visit(ime_); visit(halted_);
+    }
     CPU(Memory& memory, Timer& timer);
 
     void reset();

@@ -1,9 +1,11 @@
 #include "../../src/core/system.h"
+#include "../../src/core/serializer.h"
 #include "bus.h"
 #include "cartridge.h"
 #include <sstream>
 #include <cstring>
 #include <cstdio>
+
 
 namespace emu {
 namespace{
@@ -102,6 +104,47 @@ public:
  
     void setInput(int port, uint32_t state) override {
         bus_.setController(port, static_cast<uint8_t>(state));
+    }
+
+    bool saveState(std::vector<uint8_t>& out) const override {
+        if (!cart_.loaded()) return false;
+        StateWriter visit;
+        visit(kStateMagic);
+        visit(kStateVersion);
+        const uint32_t system_id = 1;  // 1 = NES
+        visit(system_id);
+        const uint32_t mapper_id = static_cast<uint32_t>(cart_.mapperId());
+        visit(mapper_id);
+        // visitState mutates nothing when the visitor is a writer.
+        const_cast<NesSystem*>(this)->bus_.visitState(visit);
+        out = visit.take();
+        return !out.empty();
+    }
+
+    bool loadState(const std::vector<uint8_t>& in) override {
+        if (!cart_.loaded() || in.empty()) return false;
+        StateReader visit(in.data(), in.size());
+        uint32_t magic = 0, version = 0, system_id = 0, mapper_id = 0;
+        visit(magic); visit(version); visit(system_id); visit(mapper_id);
+        if (!visit.ok() || magic != kStateMagic || version != kStateVersion ||
+            system_id != 1 ||
+            mapper_id != static_cast<uint32_t>(cart_.mapperId())) {
+            return false;
+        }
+        // Snapshot first: a truncated state must not leave a half-written machine.
+        std::vector<uint8_t> rollback;
+        if (!saveState(rollback)) return false;
+        bus_.visitState(visit);
+        if (!visit.ok()) {
+            StateReader undo(rollback.data(), rollback.size());
+            uint32_t discard = 0;
+            undo(discard); undo(discard); undo(discard); undo(discard);
+            bus_.visitState(undo);
+            return false;
+        }
+        audio_.clear();
+        audio_accum_ = 0.0;
+        return true;
     }
 
     std::string debugInfo() const override {

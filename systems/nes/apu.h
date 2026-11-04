@@ -5,6 +5,13 @@ namespace nes {
 
 class APU{
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit(pulse1_); visit(pulse2_); visit(triangle_); visit(noise_);
+        visit(frame_cycle_); visit(five_step_);
+        visit(irq_inhibit_); visit(cycle_parity_); visit(irq);
+    }
+
     APU() { reset(); }
     void reset();
     void clock();

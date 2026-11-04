@@ -13,6 +13,13 @@ class Bus;
 
 class CPU {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit(a); visit(x); visit(y); visit(sp); visit(status); visit(pc);
+        visit(addr_abs_); visit(addr_rel_); visit(fetched_);
+        visit(opcode_); visit(cycles_); visit(acc_mode_); visit(total_cycles_);
+    }
+
     explicit CPU(Bus& bus) : bus_(bus) {}
  
     void reset();

@@ -30,6 +30,37 @@ int main() {
     assert(loaded.mute_audio);
     assert(loaded.fast_forward_speed == 3);
 
+    // saveGameSettings writes every key, so everything reads back as present.
+    assert(loaded.present.scale);
+    assert(loaded.present.integer_scale);
+    assert(loaded.present.bilinear_filter);
+    assert(loaded.present.vsync);
+    assert(loaded.present.show_fps);
+    assert(loaded.present.mute_audio);
+    assert(loaded.present.fast_forward_speed);
+
+    // A file that overrides one key must not claim the others: the frontend
+    // uses these flags to decide what may override the global settings.
+    {
+        std::ofstream partial(settings_file, std::ios::trunc);
+        partial << "show_fps=true\n";
+    }
+    const auto sparse = emu::frontend::loadGameSettings(game);
+    assert(sparse.show_fps);
+    assert(sparse.present.show_fps);
+    assert(!sparse.present.vsync);
+    assert(!sparse.present.mute_audio);
+    assert(!sparse.present.scale);
+    assert(!sparse.present.fast_forward_speed);
+    // Unmentioned keys keep their defaults.
+    assert(sparse.vsync);
+    assert(sparse.fast_forward_speed == 2);
+
+    // No file at all means nothing is present.
     std::filesystem::remove(settings_file);
+    const auto absent = emu::frontend::loadGameSettings(game);
+    assert(!absent.present.show_fps);
+    assert(!absent.present.vsync);
+
     return 0;
 }

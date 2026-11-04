@@ -21,8 +21,12 @@ enum PadAction {
 enum class Upscaler {
     Nearest,
     Linear,
-    Fsr1
+    Fsr1,
+    Crt
 };
+
+// Number of Upscaler values; keep in step with the enum above.
+constexpr int kUpscalerCount = 4;
 
 enum class ScalingMode {
     Stretch,
@@ -37,6 +41,8 @@ struct Settings {
     bool vsync = true;
     Upscaler upscaler = Upscaler::Nearest;
     float sharpness = 0.2f;
+    // Seconds of hold-to-rewind history to keep.
+    int rewind_seconds = 10;
     int volume = 100;
     int audio_buffer_samples = 1024;
     std::string audio_device;
@@ -72,6 +78,19 @@ struct GameSettings {
     bool show_fps = false;
     bool mute_audio = false;
     int fast_forward_speed = 2;
+
+    // Which keys the per-game .ini actually contained. Every other field holds
+    // a default, so applying it unconditionally would silently reset the
+    // matching global setting on each launch; callers must check these first.
+    struct Present {
+        bool scale = false;
+        bool integer_scale = false;
+        bool bilinear_filter = false;
+        bool vsync = false;
+        bool show_fps = false;
+        bool mute_audio = false;
+        bool fast_forward_speed = false;
+    } present;
 };
 
 enum class VideoShader {
@@ -98,7 +117,7 @@ struct VideoSettings {
 
 SDL_Rect calculateViewport(int window_width, int window_height,
                            int game_width, int game_height,
-                           const VideoSettings& settings);
+                           double aspect_ratio, ScalingMode mode);
 
 struct ControllerProfile {
     std::string name = "Default";

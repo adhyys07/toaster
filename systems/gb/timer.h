@@ -8,6 +8,10 @@ namespace emu::gb {
 
 class Timer {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit(divider_counter_); visit(timer_counter_);
+    }
     explicit Timer(Memory& memory);
 
     void reset();

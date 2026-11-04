@@ -9,6 +9,20 @@ namespace emu::gb {
 
 class Memory {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit.block(vram_.data(), vram_.size());
+        visit.block(wram_.data(), wram_.size());
+        visit.block(hram_.data(), hram_.size());
+        visit.block(oam_.data(), oam_.size());
+        visit(joypad_select_); visit(buttons_);
+        visit(div_); visit(tima_); visit(tma_); visit(tac_);
+        visit(lcd_control_); visit(lcd_status_);
+        visit(scroll_y_); visit(scroll_x_);
+        visit(current_line_); visit(line_compare_);
+        visit(interrupt_flags_); visit(interrupt_enable_);
+    }
+
     Memory();
 
     void connect(Cartridge* cartridge);

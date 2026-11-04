@@ -75,6 +75,8 @@ add_executable(emu
     src/frontend/main.cpp
     src/frontend/settings.cpp
     src/frontend/gl_fsr_upscaler.cpp
+    src/frontend/gl_crt_shader.cpp
+    src/frontend/ui_font.cpp
     src/frontend/bios_manager.cpp
     src/frontend/core/core_manager.cpp
     src/frontend/game_metadata.cpp
@@ -90,14 +92,21 @@ add_executable(emu
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core)
 
+# Copies shaders and any bundled UI font in one pass; openUiFont() and the
+# shader loaders both look under <executable>/assets.
 add_custom_command(TARGET emu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
-            "$<TARGET_FILE_DIR:emu>/assets/shaders")
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:emu>/assets")
 
 install(TARGETS emu RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY assets/shaders
         DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
+# Fonts are optional: the UI falls back to a platform font when none is
+# bundled, and install(DIRECTORY) on a missing path is a hard error.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+    install(DIRECTORY assets/fonts
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
+endif()
 install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 set(CPACK_PACKAGE_NAME "toaster")
@@ -160,6 +169,13 @@ if(WIN32 AND TARGET SDL2::SDL2)
     add_custom_command(TARGET emu POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:emu>)
+endif()
+
+if(MINGW)
+    # Without this the executable needs libstdc++-6.dll and libgcc_s_seh-1.dll
+    # from the build machine's toolchain, which the release archive does not
+    # contain, so it fails to start with STATUS_DLL_NOT_FOUND elsewhere.
+    target_link_options(emu PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
 if(WIN32 AND SDL2_TTF_LINK_LIBRARY)

@@ -11,6 +11,29 @@ constexpr int kScreenHeight = 240;
 
 class PPU {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit.block(nametable_, sizeof(nametable_));
+        visit.block(palette_, sizeof(palette_));
+        visit.block(oam_, sizeof(oam_));
+        visit(oam_addr_);
+        visit.block(scanline_sprites_, sizeof(scanline_sprites_));
+        visit(sprite_count_);
+        visit.block(sprite_shift_lo_, sizeof(sprite_shift_lo_));
+        visit.block(sprite_shift_hi_, sizeof(sprite_shift_hi_));
+        visit(sprite_zero_possible_); visit(sprite_zero_rendered_);
+        visit(ctrl_); visit(mask_); visit(status_);
+        visit(vram_addr_.reg); visit(tram_addr_.reg);
+        visit(fine_x_); visit(write_toggle_); visit(read_buffer_);
+        visit(bg_next_id_); visit(bg_next_attr_);
+        visit(bg_next_lo_); visit(bg_next_hi_);
+        visit(bg_shift_pattern_lo_); visit(bg_shift_pattern_hi_);
+        visit(bg_shift_attr_lo_); visit(bg_shift_attr_hi_);
+        visit(scanline_); visit(cycle_); visit(odd_frame_);
+        visit(nmi); visit(frame_complete);
+        visit.block(frame_, sizeof(frame_));
+    }
+
     PPU();
 
     void connectCartridge(Cartridge* cart) { cart_ = cart; }

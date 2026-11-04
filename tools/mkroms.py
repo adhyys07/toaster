@@ -356,6 +356,43 @@ def chip8_font_rom():
     ])
 
 
+def game_boy_rom():
+    # A minimal but structurally valid 32 KB cartridge: MBC1 with 8 KB of
+    # battery-backed RAM, so a save state has to carry cartridge RAM and
+    # banking registers as well as CPU and memory state. The program is a
+    # self-contained loop that touches registers the state must preserve.
+    rom = bytearray(32 * 1024)
+
+    program = bytes([
+        0x3E, 0x2A,        # LD A, 0x2A
+        0x06, 0x13,        # LD B, 0x13
+        0x0E, 0x07,        # LD C, 0x07
+        0x21, 0x00, 0xC0,  # LD HL, 0xC000  (work RAM)
+        0x3C,              # INC A
+        0x04,              # INC B
+        0x23,              # INC HL
+        0x00,              # NOP
+        0xC3, 0x09, 0x01,  # JP 0x0109 (back to the INC A above)
+    ])
+    rom[0x0100:0x0100 + len(program)] = program
+
+    title = b'TOASTERGB'
+    rom[0x0134:0x0134 + len(title)] = title
+
+    rom[0x0147] = 0x03  # MBC1 + RAM + battery
+    rom[0x0148] = 0x00  # 32 KB of ROM
+    rom[0x0149] = 0x02  # 8 KB of cartridge RAM
+
+    # The header checksum covers 0x0134..0x014C. The core does not verify it,
+    # but a correct value keeps the ROM valid for other tools.
+    checksum = 0
+    for byte in rom[0x0134:0x014D]:
+        checksum = (checksum - byte - 1) & 0xFF
+    rom[0x014D] = checksum
+
+    return bytes(rom)
+
+
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else 'roms'
     os.makedirs(out_dir, exist_ok=True)
@@ -369,11 +406,13 @@ def main():
             handle.write(data)
         print('wrote %s (%d bytes)' % (path, len(data)))
 
-    path = os.path.join(out_dir, 'fonttest.ch8')
-    data = chip8_font_rom()
-    with open(path, 'wb') as handle:
-        handle.write(data)
-    print('wrote %s (%d bytes)' % (path, len(data)))
+    for name, builder in (('fonttest.ch8', chip8_font_rom),
+                          ('regtest.gb', game_boy_rom)):
+        path = os.path.join(out_dir, name)
+        data = builder()
+        with open(path, 'wb') as handle:
+            handle.write(data)
+        print('wrote %s (%d bytes)' % (path, len(data)))
 
 
 if __name__ == '__main__':

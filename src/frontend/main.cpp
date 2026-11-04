@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <cstdio>
@@ -18,12 +19,20 @@
 #include "psp_system.h"
 #include "ps1_system.h"
 #include "gl_fsr_upscaler.h"
+#include "ui_font.h"
+#include "rewind_buffer.h"
+#include "pause_menu.h"
+#include "gl_crt_shader.h"
 #include <array>
 #include "settings.h"
 #include "ps2_system.h"
+#include "game_metadata.h"
 #include "crash_logger.h"
 #include "core/core_manager.h"
-#include "library_client.h"
+#include "game_library.h"
+#include "bios_manager.h"
+#include "sha256.h"
+#include "save_state_manager.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -51,7 +60,9 @@ void printUsage(const char* exe) {
         "  --help\n"
         "\n"
         "Without a ROM argument, open the game library. O opens a game file.\n"
-        "F11 toggles fullscreen; Esc quits during gameplay.\n",
+        "F11 toggles fullscreen; Esc quits during gameplay.\n"
+        "F1 opens the pause menu. Shift+F1-F9 save a state, Ctrl+1-9 load\n"
+        "one, and holding Backspace rewinds on cores with save states.\n",
         exe);
 }
 
@@ -71,9 +82,9 @@ struct GameEntry
 };
 
 std::string gamePathKey(const fs::path& path) {
-    std::error_code error;
-    const fs::path absolute = fs::absolute(path, error);
-    return (error ? path : absolute).lexically_normal().string();
+    // Same normalization the library service matching uses, so favorites.txt
+    // keys and remote lookups can never disagree about what a path means.
+    return emu::frontend::libraryPathKey(path);
 }
 
 std::set<std::string> loadFavorites() {
@@ -98,57 +109,22 @@ bool saveFavorites(const std::vector<GameEntry>& games) {
     return file.good();
 }
 
-bool saveStateToSlot(const emu::System& system,
-                     const std::string& rom_path,
-                     int slot) {
-    std::vector<uint8_t> state;
-    if (slot < 1 || slot > 9 || !system.saveState(state) || state.empty()) {
-        return false;
-    }
+GameEntry readGameEntry(const fs::path& rom_path) {
+    emu::frontend::GameMetadata meta =
+        emu::frontend::detectGameMetadata(rom_path);
+    const fs::path sidecar = rom_path.string() + ".meta";
+    emu::frontend::loadGameMetadata(sidecar, meta);   // overlays if present
 
-    fs::path path = fs::path(rom_path);
-    path.replace_extension(
-        ".slot" + std::to_string(slot) + ".state");
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) return false;
-
-    file.write(reinterpret_cast<const char*>(state.data()),
-               static_cast<std::streamsize>(state.size()));
-    return file.good() &&
-           static_cast<size_t>(file.tellp()) == state.size();
-}
-
-bool loadStateFromSlot(emu::System& system,
-                       const std::string& rom_path,
-                       int slot) {
-    if (slot < 1 || slot > 9) return false;
-
-    fs::path path = fs::path(rom_path);
-    path.replace_extension(
-        ".slot" + std::to_string(slot) + ".state");
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return false;
-
-    file.seekg(0, std::ios::end);
-    const std::streamoff size = file.tellg();
-    if (size <= 0) return false;
-    file.seekg(0, std::ios::beg);
-
-    std::vector<uint8_t> state(static_cast<size_t>(size));
-    file.read(reinterpret_cast<char*>(state.data()), size);
-    if (!file || file.gcount() != size) return false;
-
-    return system.loadState(state);
-}
-
-GameEntry readGameEntry(const fs::path& romPath) {
     GameEntry game;
-    game.path = romPath;
-    game.title = romPath.stem().string();
+    // Fall back to the detected values: a hand-written sidecar may omit them.
+    game.path = meta.path.empty() ? rom_path : meta.path;
+    game.title = meta.title.empty() ? rom_path.stem().string() : meta.title;
 
-    std::ifstream metadata(romPath.string() + ".meta");
+    // GameMetadata carries only what the frontend needs in order to launch a
+    // game. The descriptive fields the library pane shows live in the same
+    // sidecar, so read those directly.
+    std::ifstream metadata(sidecar);
     std::string line;
-
     while (std::getline(metadata, line)) {
         const auto equals = line.find('=');
         if (equals == std::string::npos) continue;
@@ -156,13 +132,14 @@ GameEntry readGameEntry(const fs::path& romPath) {
         const std::string key = line.substr(0, equals);
         const std::string value = line.substr(equals + 1);
 
-        if (key == "title") game.title = value;
-        else if (key == "developer") game.developer = value;
+        if (key == "developer") game.developer = value;
         else if (key == "year") game.year = value;
         else if (key == "genre") game.genre = value;
         else if (key == "description") game.description = value;
     }
 
+    // game.favorite is filled in by scanGames from favorites.txt, which stays
+    // the single source of truth for the flag.
     return game;
 }
 
@@ -291,32 +268,6 @@ void drawMenuPanel(SDL_Renderer* renderer, const SDL_Rect& rect,
 bool pointInside(const SDL_Rect& rect, int x, int y) {
     return x >= rect.x && x < rect.x + rect.w &&
            y >= rect.y && y < rect.y + rect.h;
-}
-
-SDL_Rect calculateViewport(int window_width, int window_height,
-                           int video_width, int video_height,
-                           double aspect_ratio,
-                           emu::frontend::ScalingMode mode) {
-    if (mode == emu::frontend::ScalingMode::Stretch) {
-        return {0, 0, window_width, window_height};
-    }
-
-    double scale = std::min(
-        static_cast<double>(window_width) / video_width,
-        static_cast<double>(window_height) / video_height);
-    if (mode == emu::frontend::ScalingMode::Integer) {
-        scale = std::max(1.0, std::floor(scale));
-    }
-
-    int width = static_cast<int>(video_width * scale);
-    int height = static_cast<int>(width / aspect_ratio);
-    if (height > window_height) {
-        height = window_height;
-        width = static_cast<int>(height * aspect_ratio);
-    }
-
-    return {(window_width - width) / 2, (window_height - height) / 2,
-            width, height};
 }
 
 void drawMenuButton(SDL_Renderer* renderer, TTF_Font* font,
@@ -578,8 +529,8 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
     return saved;
 }
 std::string chooseRomFile();
-bool importPs2Bios(const std::string& system_directory);
-bool importPs1Bios(const std::string& system_directory);
+bool importBios(emu::frontend::BiosSystem target,
+                const std::string& system_directory);
 bool installCoreFiles(const std::string& server_url);
 
 std::string showGameMenu(const fs::path& folder,
@@ -588,45 +539,66 @@ std::string showGameMenu(const fs::path& folder,
                          const std::string& core_server_url,
                          const std::string& library_server_url) {
     auto games = scanGames(folder);
-    std::unique_ptr<emu::frontend::LibraryClient> library_client;
-    emu::frontend::LibraryStatistics library_statistics;
+    std::unique_ptr<emu::frontend::GameLibrary> library;
+
+    // Copies the service's cached rows into the list the menu draws. Every
+    // refresh goes through here so artwork and tags cannot end up populated
+    // on one code path and missing on another.
+    const auto adoptLibraryGames = [&] {
+        if (!library) return;
+        games.clear();
+        for (const emu::frontend::RemoteGame& remote : library->games()) {
+            GameEntry game;
+            game.path = remote.path;
+            game.title = remote.title;
+            game.favorite = remote.favorite;
+            game.artwork = remote.artwork;
+            game.tags = remote.tags;
+            games.push_back(std::move(game));
+        }
+    };
+
     if (!library_server_url.empty()) {
-        library_client = std::make_unique<emu::frontend::LibraryClient>(
+        library = std::make_unique<emu::frontend::GameLibrary>(
             library_server_url);
         std::string library_error;
-        if (library_client->scan(folder.string(), library_error)) {
-            std::vector<emu::frontend::RemoteGame> remote_games;
-            if (library_client->listGames(remote_games, library_error)) {
-                games.clear();
-                for (const auto& remote : remote_games) {
-                    GameEntry game;
-                    game.path = remote.path;
-                    game.title = remote.title;
-                    game.favorite = remote.favorite;
-                    game.tags = remote.tags;
-                    games.push_back(std::move(game));
-                }
-                library_client->getStatistics(library_statistics, library_error);
-            }
+        if (library->scanFolder(folder.string(), library_error)) {
+            adoptLibraryGames();
         } else {
             std::fprintf(stderr, "Library service unavailable: %s\n",
                          library_error.c_str());
-            library_client.reset();
+            library.reset();
         }
     }
+
+    // Rescan: ask the service to re-read the folder, or fall back to the
+    // built-in scanner when there is no service.
+    const auto rescanGames = [&] {
+        if (library) {
+            std::string library_error;
+            if (!library->scanFolder(folder.string(), library_error)) {
+                std::fprintf(stderr, "Could not rescan library: %s\n",
+                             library_error.c_str());
+                return;
+            }
+            adoptLibraryGames();
+        } else {
+            games = scanGames(folder);
+        }
+    };
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
         return {};
     }
 
-    TTF_Font* font = TTF_OpenFont("C:/Windows/Fonts/segoeui.ttf", 20);
-    if (!font) font = TTF_OpenFont("C:/Windows/Fonts/arial.ttf", 20);
+    std::string font_error;
+    TTF_Font* font = emu::frontend::openUiFont(20, font_error);
     if (!font) {
-        std::fprintf(stderr, "Could not open a Windows font: %s\n",
-                     TTF_GetError());
+        std::fprintf(stderr, "%s\n", font_error.c_str());
         TTF_Quit();
         return {};
     }
+
 
     SDL_Window* menu_window = SDL_CreateWindow(
         "Emulator Game Library", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -664,19 +636,13 @@ std::string showGameMenu(const fs::path& folder,
     std::string search;
     bool search_active = false;
     const auto markPlayed = [&](const GameEntry& game) {
-        if (!library_client) return;
-        std::vector<emu::frontend::RemoteGame> remote_games;
+        if (!library) return;
+        const emu::frontend::RemoteGame* remote = library->find(game.path);
+        if (!remote) return;
         std::string library_error;
-        if (!library_client->listGames(remote_games, library_error)) {
+        if (!library->markPlayed(*remote, library_error)) {
             std::fprintf(stderr, "Could not update recent games: %s\n",
                          library_error.c_str());
-            return;
-        }
-        for (const auto& remote : remote_games) {
-            if (gamePathKey(fs::path(remote.path)) == gamePathKey(game.path)) {
-                library_client->markPlayed(remote.id, library_error);
-                return;
-            }
         }
     };
     while (running) {
@@ -742,10 +708,12 @@ std::string showGameMenu(const fs::path& folder,
             const std::string count = std::to_string(visible_games.size()) +
                 (visible_games.size() == 1 ? " game" : " games");
             drawMenuText(menu_renderer, font, count, 340, 103, muted);
-            if (library_client) {
+            if (library) {
                 drawMenuText(menu_renderer, font,
-                             "Total " + std::to_string(library_statistics.total) +
-                                 "  Plays " + std::to_string(library_statistics.plays),
+                             "Total " +
+                                 std::to_string(library->statistics().total) +
+                                 "  Plays " +
+                                 std::to_string(library->statistics().plays),
                              36, 560, muted);
             }
             drawMenuText(menu_renderer, font,
@@ -881,24 +849,34 @@ std::string showGameMenu(const fs::path& folder,
                     break;
                 case SDLK_f:
                     if (!visible_games.empty()) {
-                        const std::string path =
-                            gamePathKey(visible_games[selected].path);
+                        // `selected` indexes the filtered list, so the game to
+                        // flip has to be found by path: indexing `games` or the
+                        // service's rows with it favorites a different game
+                        // whenever a search is active.
+                        const fs::path chosen = visible_games[selected].path;
+                        const std::string path = gamePathKey(chosen);
+                        bool favorite = false;
                         for (GameEntry& game : games) {
                             if (gamePathKey(game.path) == path) {
                                 game.favorite = !game.favorite;
+                                favorite = game.favorite;
                                 break;
                             }
                         }
                         std::string library_error;
-                        if (library_client) {
-                            std::vector<emu::frontend::RemoteGame> remote_games;
-                            if (!library_client->listGames(remote_games, library_error)) {
-                                std::fprintf(stderr, "Could not refresh library: %s\n",
+                        if (library) {
+                            const emu::frontend::RemoteGame* remote =
+                                library->find(chosen);
+                            if (!remote) {
+                                std::fprintf(stderr,
+                                             "The library service does not know %s\n",
+                                             path.c_str());
+                            } else if (!library->setFavorite(
+                                           *remote, favorite, library_error)) {
+                                std::fprintf(stderr, "Could not set favorite: %s\n",
                                              library_error.c_str());
-                            } else if (selected < remote_games.size()) {
-                                library_client->setFavorite(
-                                    remote_games[selected].id,
-                                    games[selected].favorite, library_error);
+                            } else {
+                                adoptLibraryGames();
                             }
                         } else if (!saveFavorites(games)) {
                             std::fprintf(stderr,
@@ -916,25 +894,7 @@ std::string showGameMenu(const fs::path& folder,
                     redraw = true;
                     break;
                 case SDLK_r:
-                    if (library_client) {
-                        std::string library_error;
-                        library_client->scan(folder.string(), library_error);
-                        std::vector<emu::frontend::RemoteGame> remote_games;
-                        if (library_client->listGames(remote_games, library_error)) {
-                            games.clear();
-                            for (const auto& remote : remote_games) {
-                                GameEntry game;
-                                game.path = remote.path;
-                                game.title = remote.title;
-                                game.favorite = remote.favorite;
-                                game.artwork = remote.artwork;
-                                game.tags = remote.tags;
-                                games.push_back(std::move(game));
-                            }
-                        }
-                    } else {
-                        games = scanGames(folder);
-                    }
+                    rescanGames();
                     selected = 0;
                     first_visible = 0;
                     redraw = true;
@@ -944,7 +904,7 @@ std::string showGameMenu(const fs::path& folder,
                     redraw = true;
                     break;
                 case SDLK_b:
-                    importPs2Bios(system_directory);
+                    importBios(emu::frontend::BiosSystem::Ps2, system_directory);
                     redraw = true;
                     break;
                 case SDLK_o: {
@@ -992,7 +952,7 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(ps1_bios_button,event.button.x, event.button.y)) {
-                    importPs1Bios(system_directory);
+                    importBios(emu::frontend::BiosSystem::Ps1, system_directory);
                     redraw = true;
                     break;
                 }
@@ -1004,7 +964,7 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(bios_button, event.button.x, event.button.y)) {
-                    importPs2Bios(system_directory);
+                    importBios(emu::frontend::BiosSystem::Ps2, system_directory);
                     redraw = true;
                     break;
                 }
@@ -1028,23 +988,7 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(rescan_button, event.button.x, event.button.y)) {
-                    if (library_client) {
-                        std::string library_error;
-                        library_client->scan(folder.string(), library_error);
-                        std::vector<emu::frontend::RemoteGame> remote_games;
-                        if (library_client->listGames(remote_games, library_error)) {
-                            games.clear();
-                            for (const auto& remote : remote_games) {
-                                GameEntry game;
-                                game.path = remote.path;
-                                game.title = remote.title;
-                                game.favorite = remote.favorite;
-                                games.push_back(std::move(game));
-                            }
-                        }
-                    } else {
-                        games = scanGames(folder);
-                    }
+                    rescanGames();
                     selected = 0;
                     first_visible = 0;
                     redraw = true;
@@ -1164,11 +1108,78 @@ SDL_Scancode nesPlayerTwoKey(const char* button_name) {
     return SDL_SCANCODE_UNKNOWN;
 }
 
+// Save-state slots live in a "states" folder beside the executable so a
+// portable install carries them with the binary.
+emu::frontend::SaveStateManager& saveStateManager() {
+    static emu::frontend::SaveStateManager manager([] {
+        char* raw_base = SDL_GetBasePath();
+        const fs::path base = raw_base ? fs::path(raw_base) : fs::current_path();
+        if (raw_base) SDL_free(raw_base);
+        return base / "states";
+    }());
+    return manager;
+}
+
+bool saveStateToSlot(const emu::System& system,
+                     const std::string& game_path,
+                     int slot) {
+    std::vector<uint8_t> state;
+    if (!system.saveState(state) || state.empty()) return false;
+
+    const std::string blob(reinterpret_cast<const char*>(state.data()),
+                           state.size());
+    std::string error;
+    // Key on the normalized path so launching the same ROM through a relative
+    // path and an absolute one reaches the same slots.
+    if (!saveStateManager().save(slot, gamePathKey(game_path), blob, error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool loadStateFromSlot(emu::System& system,
+                       const std::string& game_path,
+                       int slot) {
+    std::string blob;
+    std::string error;
+    if (!saveStateManager().load(slot, gamePathKey(game_path), blob, error)) {
+        std::fprintf(stderr, "%s\n", error.c_str());
+        return false;
+    }
+
+    const std::vector<uint8_t> state(blob.begin(), blob.end());
+    return system.loadState(state);
+}
+
 int runGenericGame(const std::string& rom_path,
                    bool mute,
                    bool start_fullscreen,
                    emu::frontend::Settings& settings) {
     std::string error;
+
+    // Per-game overrides from "<rom>.ini". Only keys the file actually
+    // contained are applied: loadGameSettings fills the rest with struct
+    // defaults, so copying those over would reset the global settings on
+    // every launch of a game that has no override for them.
+    const emu::frontend::GameSettings game_settings =
+        emu::frontend::loadGameSettings(rom_path);
+    if (game_settings.present.vsync) settings.vsync = game_settings.vsync;
+    if (game_settings.present.show_fps)
+        settings.show_fps = game_settings.show_fps;
+    if (game_settings.present.mute_audio)
+        settings.mute = game_settings.mute_audio;
+    if (game_settings.present.integer_scale) {
+        settings.scaling = game_settings.integer_scale
+            ? emu::frontend::ScalingMode::Integer
+            : emu::frontend::ScalingMode::Aspect;
+    }
+    if (game_settings.present.bilinear_filter &&
+        game_settings.bilinear_filter &&
+        settings.upscaler == emu::frontend::Upscaler::Nearest) {
+        settings.upscaler = emu::frontend::Upscaler::Linear;
+    }
+
     emu::SystemPtr system = emu::createForFile(rom_path, error);
     
     if (!system) {
@@ -1193,8 +1204,44 @@ int runGenericGame(const std::string& rom_path,
     const std::string base_title = std::string(system->name()) + " - " + rom_path;
     std::string title = base_title;
 
+    emu::frontend::RewindBuffer rewind_buffer(
+        settings.rewind_seconds * 30, 2);
+    bool rewinding = false;
+
+    // The pause menu only needs a font once it is opened, and opening one
+    // costs an SDL_ttf init, so both are deferred until then. A missing font
+    // is not fatal: the selected entry is always mirrored in the window title,
+    // which is also the only way to show it in the OpenGL render paths.
+    emu::frontend::PauseMenu menu;
+    TTF_Font* menu_font = nullptr;
+    bool menu_font_attempted = false;
+    bool ttf_initialized_here = false;
+    const auto menuFont = [&]() -> TTF_Font* {
+        if (menu_font || menu_font_attempted) return menu_font;
+        menu_font_attempted = true;
+        if (TTF_WasInit() == 0) {
+            if (TTF_Init() != 0) {
+                std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
+                return nullptr;
+            }
+            ttf_initialized_here = true;
+        }
+        std::string font_error;
+        menu_font = emu::frontend::openUiFont(20, font_error);
+        if (!menu_font) std::fprintf(stderr, "%s\n", font_error.c_str());
+        return menu_font;
+    };
+
+    const bool rewind_supported = [&] {
+        std::vector<uint8_t> probe;
+        return system->saveState(probe) && !probe.empty();
+    }();
+
     const bool use_fsr = settings.upscaler == emu::frontend::Upscaler::Fsr1;
-    if (use_fsr) {
+    const bool use_crt = settings.upscaler == emu::frontend::Upscaler::Crt;
+    // Both post-process filters render through the same GL context.
+    const bool use_opengl = use_fsr || use_crt;
+    if (use_opengl) {
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
@@ -1203,7 +1250,7 @@ int runGenericGame(const std::string& rom_path,
     }
 
     Uint32 window_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
-    if (use_fsr) window_flags |= SDL_WINDOW_OPENGL;
+    if (use_opengl) window_flags |= SDL_WINDOW_OPENGL;
     if (start_fullscreen) {
         window_flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
     }
@@ -1222,7 +1269,8 @@ int runGenericGame(const std::string& rom_path,
     SDL_GLContext gl_context = nullptr;
     SDL_Renderer* renderer = nullptr;
     emu::frontend::FsrUpscaler fsr;
-    if (use_fsr) {
+    emu::frontend::CrtShader crt;
+    if (use_opengl) {
         gl_context = SDL_GL_CreateContext(window);
         if (!gl_context) {
             std::fprintf(stderr, "SDL_GL_CreateContext: %s\n", SDL_GetError());
@@ -1236,14 +1284,20 @@ int runGenericGame(const std::string& rom_path,
         if (base_path) {
             const fs::path executable_shader_directory =
                 fs::path(base_path) / "assets" / "shaders";
-            if (fs::exists(executable_shader_directory / "fsr_easu.frag")) {
+            const char* probe = use_crt ? "crt.frag" : "fsr_easu.frag";
+            if (fs::exists(executable_shader_directory / probe)) {
                 shader_directory = executable_shader_directory;
             }
             SDL_free(base_path);
         }
 
-        if (!fsr.initialize(window, shader_directory.string(), error)) {
-            std::fprintf(stderr, "FSR initialization failed: %s\n", error.c_str());
+        const bool initialized = use_crt
+            ? crt.initialize(window, shader_directory.string(), error)
+            : fsr.initialize(window, shader_directory.string(), error);
+        if (!initialized) {
+            std::fprintf(stderr, "%s initialization failed: %s\n",
+                         use_crt ? "CRT filter" : "FSR", error.c_str());
+            crt.shutdown();
             fsr.shutdown();
             SDL_GL_DeleteContext(gl_context);
             SDL_DestroyWindow(window);
@@ -1285,7 +1339,7 @@ int runGenericGame(const std::string& rom_path,
                                  texture_width * static_cast<int>(sizeof(uint32_t))) == 0;
     };
 
-    if (!use_fsr && !updateTexture()) {
+    if (!use_opengl && !updateTexture()) {
         std::fprintf(stderr, "Could not create the game's video texture: %s\n", SDL_GetError());
         if (texture) SDL_DestroyTexture(texture);
         if (renderer) SDL_DestroyRenderer(renderer);
@@ -1326,6 +1380,74 @@ int runGenericGame(const std::string& rom_path,
     bool frame_advance = false;
     bool fast_forward = false;
 
+    const auto syncMenuTitle = [&] {
+        SDL_SetWindowTitle(window,
+                           menu.isOpen()
+                               ? (base_title + " | PAUSED | " +
+                                  menu.selectedLabel()).c_str()
+                               : base_title.c_str());
+    };
+
+    const auto toggleFullscreen = [&] {
+        const bool is_fullscreen =
+            (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+        if (SDL_SetWindowFullscreen(
+                window, is_fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+            std::fprintf(stderr, "Could not toggle fullscreen: %s\n",
+                         SDL_GetError());
+        }
+    };
+
+    // Slot 1 is what the menu reaches; F-keys still address all nine slots.
+    const auto activateMenuItem = [&] {
+        using emu::frontend::PauseAction;
+        switch (menu.selectedAction()) {
+        case PauseAction::Resume:
+            menu.close();
+            break;
+        case PauseAction::SaveState:
+            if (!saveStateToSlot(*system, rom_path, 1))
+                std::fprintf(stderr, "Save state slot 1 failed\n");
+            break;
+        case PauseAction::LoadState:
+            if (loadStateFromSlot(*system, rom_path, 1))
+                rewind_buffer.clear();
+            else
+                std::fprintf(stderr, "Load state slot 1 failed\n");
+            break;
+        case PauseAction::ResetGame:
+            system->reset();
+            rewind_buffer.clear();
+            menu.close();
+            break;
+        case PauseAction::ToggleVsync:
+            settings.vsync = !settings.vsync;
+            if (renderer) SDL_RenderSetVSync(renderer, settings.vsync ? 1 : 0);
+            else SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0);
+            break;
+        case PauseAction::ToggleFps:
+            settings.show_fps = !settings.show_fps;
+            break;
+        case PauseAction::DecreaseVolume:
+            emu::frontend::changeVolume(settings, -5);
+            break;
+        case PauseAction::IncreaseVolume:
+            emu::frontend::changeVolume(settings, 5);
+            break;
+        case PauseAction::ToggleMute:
+            settings.mute = !settings.mute;
+            break;
+        case PauseAction::ToggleFullscreen:
+            toggleFullscreen();
+            break;
+        case PauseAction::Quit:
+            running = false;
+            break;
+        }
+        paused = menu.isOpen();
+        syncMenuTitle();
+    };
+
     std::array<SDL_GameController*, 2> gamepads{};
     const bool gamecontroller_ready =
         SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) == 0;
@@ -1365,18 +1487,41 @@ int runGenericGame(const std::string& rom_path,
     while (running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_QUIT ||
-                (event.type == SDL_KEYDOWN && event.key.keysym.scancode == SDL_SCANCODE_ESCAPE)) {
+            if (event.type == SDL_QUIT) {
+                running = false;
+            } else if (event.type == SDL_KEYDOWN && menu.isOpen()) {
+                // While the menu is up it owns the keyboard, so the arrow keys
+                // navigate instead of also reaching the game, and Escape backs
+                // out of the menu rather than quitting.
+                const SDL_Scancode scancode = event.key.keysym.scancode;
+                if (scancode == SDL_SCANCODE_UP) {
+                    menu.moveUp();
+                    syncMenuTitle();
+                } else if (scancode == SDL_SCANCODE_DOWN) {
+                    menu.moveDown();
+                    syncMenuTitle();
+                } else if (scancode == SDL_SCANCODE_RETURN ||
+                           scancode == SDL_SCANCODE_KP_ENTER) {
+                    if (!event.key.repeat) activateMenuItem();
+                } else if (scancode == SDL_SCANCODE_ESCAPE ||
+                           scancode == SDL_SCANCODE_F1) {
+                    menu.close();
+                    paused = false;
+                    syncMenuTitle();
+                }
+            } else if (event.type == SDL_KEYDOWN &&
+                       event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
                 running = false;
             } else if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+                       event.key.keysym.scancode == SDL_SCANCODE_F1 &&
+                       (event.key.keysym.mod & KMOD_SHIFT) == 0) {
+                menu.open();
+                paused = true;
+                menuFont();
+                syncMenuTitle();
+            } else if (event.type == SDL_KEYDOWN && !event.key.repeat &&
                        event.key.keysym.scancode == SDL_SCANCODE_F11) {
-                const bool is_fullscreen =
-                    (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
-                if (SDL_SetWindowFullscreen(
-                        window,
-                        is_fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
-                    std::fprintf(stderr, "Could not toggle fullscreen: %s\n", SDL_GetError());
-                }
+                toggleFullscreen();
             } else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
                 const SDL_Keycode key = event.key.keysym.sym;
                 if (key == SDLK_p) {
@@ -1393,7 +1538,10 @@ int runGenericGame(const std::string& rom_path,
                     settings.volume = std::min(100, settings.volume + 5);
                 } else if (key == SDLK_m) {
                     settings.mute = !settings.mute;
-                } else if (key >= SDLK_F1 && key <= SDLK_F9) {
+                } else if (key >= SDLK_F1 && key <= SDLK_F9 &&
+                           (event.key.keysym.mod & KMOD_SHIFT)) {
+                    // Plain F1 opens the pause menu, so saving is on
+                    // Shift+F1-F9 for every slot rather than only for slot 1.
                     const int slot = static_cast<int>(key - SDLK_F1) + 1;
                     if (!saveStateToSlot(*system, rom_path, slot)) {
                         std::fprintf(stderr,
@@ -1403,11 +1551,30 @@ int runGenericGame(const std::string& rom_path,
                 } else if (key >= SDLK_1 && key <= SDLK_9 &&
                            (event.key.keysym.mod & KMOD_CTRL)) {
                     const int slot = static_cast<int>(key - SDLK_1) + 1;
-                    if (!loadStateFromSlot(*system, rom_path, slot)) {
+                    if (loadStateFromSlot(*system, rom_path, slot)) {
+                        // History captured before the jump no longer belongs
+                        // to this timeline.
+                        rewind_buffer.clear();
+                    } else {
                         std::fprintf(stderr,
                                      "Load state slot %d is unsupported or failed\n",
                                      slot);
                     }
+                }
+            } else if (event.type == SDL_CONTROLLERBUTTONDOWN && menu.isOpen()) {
+                const Uint8 button = event.cbutton.button;
+                if (button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+                    menu.moveUp();
+                    syncMenuTitle();
+                } else if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+                    menu.moveDown();
+                    syncMenuTitle();
+                } else if (button == SDL_CONTROLLER_BUTTON_A) {
+                    activateMenuItem();
+                } else if (button == SDL_CONTROLLER_BUTTON_B) {
+                    menu.close();
+                    paused = false;
+                    syncMenuTitle();
                 }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                 // Added events carry a device index.
@@ -1425,9 +1592,14 @@ int runGenericGame(const std::string& rom_path,
                     }
                 }
             }
+
         }
 
         const Uint8* keyboard = SDL_GetKeyboardState(nullptr);
+        // The menu owns the input while it is up: held keys must not reach the
+        // game, and Backspace must navigate rather than rewind.
+        rewinding = rewind_supported && !menu.isOpen() &&
+                    keyboard[SDL_SCANCODE_BACKSPACE];
         const std::string system_name = normalizedButtonName(system->name());
         const bool is_pico8 = system_name == "PICO-8" || system_name == "PICO8";
 
@@ -1476,17 +1648,30 @@ int runGenericGame(const std::string& rom_path,
                 if (down) button_state |= button.mask;
             }
 
-            system->setInput(port, button_state);
+            system->setInput(port, menu.isOpen() ? 0u : button_state);
         }
 
-        if (!paused || frame_advance) {
+        if (rewinding) {
+            // Walk back through captured states; stop rewinding once the
+            // history runs dry so the game resumes instead of freezing.
+            if (!rewind_buffer.rewind(*system)) rewinding = false;
+        } else if (!paused || frame_advance) {
+            // Capturing costs a full serialize, so skip it entirely for cores
+            // without save states and when the user has turned rewind off.
+            if (rewind_supported && settings.rewind_seconds > 0)
+                rewind_buffer.capture(*system);
             system->runFrame();
             frame_advance = false;
         }
-        if (use_fsr) {
-            if (!fsr.render(system->video(), system->aspectRatio(),
-                            settings.sharpness, error)) {
-                std::fprintf(stderr, "FSR render failed: %s\n", error.c_str());
+        if (use_opengl) {
+            const bool rendered = use_crt
+                ? crt.render(system->video(), system->aspectRatio(),
+                             settings.sharpness, error)
+                : fsr.render(system->video(), system->aspectRatio(),
+                             settings.sharpness, error);
+            if (!rendered) {
+                std::fprintf(stderr, "%s render failed: %s\n",
+                             use_crt ? "CRT filter" : "FSR", error.c_str());
                 break;
             }
             SDL_GL_SwapWindow(window);
@@ -1501,14 +1686,51 @@ int runGenericGame(const std::string& rom_path,
             int window_height = 0;
             SDL_GetWindowSize(window, &window_width, &window_height);
             const emu::VideoFrame frame = system->video();
-            const SDL_Rect viewport = calculateViewport(
+            const SDL_Rect viewport = emu::frontend::calculateViewport(
                 window_width, window_height, frame.width, frame.height,
                 system->aspectRatio(), settings.scaling);
             SDL_RenderCopy(renderer, texture, nullptr, &viewport);
+
+            if (menu.isOpen()) {
+                if (TTF_Font* font = menuFont()) {
+                    constexpr int kRowHeight = 32;
+                    const int rows = static_cast<int>(menu.itemCount());
+                    const SDL_Rect panel{
+                        (window_width - 320) / 2,
+                        (window_height - (rows * kRowHeight + 32)) / 2,
+                        320, rows * kRowHeight + 32};
+
+                    drawMenuPanel(renderer, panel, SDL_Color{16, 18, 26, 240},
+                                  SDL_Color{60, 68, 86, 255},
+                                  SDL_Color{70, 130, 220, 255});
+
+                    for (int row = 0; row < rows; ++row) {
+                        const bool is_selected =
+                            static_cast<std::size_t>(row) == menu.selectedIndex();
+                        const SDL_Rect line{panel.x + 10,
+                                            panel.y + 16 + row * kRowHeight,
+                                            panel.w - 20, kRowHeight};
+                        if (is_selected) {
+                            SDL_SetRenderDrawColor(renderer, 30, 88, 178, 255);
+                            SDL_RenderFillRect(renderer, &line);
+                        }
+                        drawMenuText(renderer, font,
+                                     menu.itemLabel(
+                                         static_cast<std::size_t>(row)),
+                                     line.x + 12, line.y + 5,
+                                     is_selected
+                                         ? SDL_Color{255, 255, 255, 255}
+                                         : SDL_Color{188, 196, 212, 255});
+                    }
+                }
+            }
+
             SDL_RenderPresent(renderer);
         }
 
-        if (settings.show_fps) {
+        // The menu keeps the window title, so the FPS counter must not
+        // overwrite it while the menu is up.
+        if (settings.show_fps && !menu.isOpen()) {
             ++fps_frame_count;
             const Uint64 fps_now = SDL_GetPerformanceCounter();
             const double elapsed = static_cast<double>(fps_now - fps_window_start) /
@@ -1541,10 +1763,8 @@ int runGenericGame(const std::string& rom_path,
             }
         }
 
-        const double speed_multiplier = fast_forward ? 4.0 : 1.0;
+        const double speed_multiplier = fast_forward ? std::max(1, game_settings.fast_forward_speed) : 1;
         next_frame += target_frame_ticks / speed_multiplier;
-
-        next_frame += target_frame_ticks / (fast_forward ? 4.0 : 1.0);
         const double now = static_cast<double>(SDL_GetPerformanceCounter());
         if (next_frame > now) {
             const Uint32 delay_ms = static_cast<Uint32>(
@@ -1558,10 +1778,14 @@ int runGenericGame(const std::string& rom_path,
     for (SDL_GameController* gamepad : gamepads) {
         if (gamepad) SDL_GameControllerClose(gamepad);
     }
+    if (menu_font) TTF_CloseFont(menu_font);
+    // Only tear SDL_ttf down if the pause menu is what brought it up.
+    if (ttf_initialized_here) TTF_Quit();
     if (audio) SDL_CloseAudioDevice(audio);
     if (texture) SDL_DestroyTexture(texture);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (gl_context) {
+        crt.shutdown();
         fsr.shutdown();
         SDL_GL_DeleteContext(gl_context);
     }
@@ -1598,244 +1822,130 @@ std::string chooseRomFile() {
     return {};
 }
 
-bool importPs1Bios(const std::string& system_directory) {
-#ifdef _WIN32
-    char filename[32768] = {};
-    OPENFILENAMEA dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.lpstrFilter =
-        "PS1 BIOS images (*.bin;*.rom;*.bios)\0*.bin;*.rom;*.bios\0"
-        "All files\0*.*\0";
-    dialog.lpstrFile = filename;
-    dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
-    dialog.Flags = OFN_FILEMUSTEXIST |
-                   OFN_PATHMUSTEXIST |
-                   OFN_NOCHANGEDIR;
-    dialog.lpstrTitle = "Select a PS1 BIOS dump you own";
-
-    if (!GetOpenFileNameA(&dialog)) {
-        return false;
-    }
-
-    std::error_code error;
-    const fs::path source = fs::absolute(fs::path(filename), error);
-
-    if (error || !fs::is_regular_file(source, error) || error) {
-        SDL_ShowSimpleMessageBox(
-            SDL_MESSAGEBOX_ERROR,
-            "PS1 BIOS",
-            "The selected BIOS file could not be read.",
-            nullptr);
-        return false;
-    }
-
+// Resolves the --system-dir value the way the rest of the frontend expects: a
+// relative path is tried as given, then beside the executable, then one level
+// up, so a portable install and a build tree both work.
+fs::path resolveSystemRoot(const std::string& system_directory) {
     fs::path base_path;
     if (char* raw_base = SDL_GetBasePath()) {
         base_path = raw_base;
         SDL_free(raw_base);
     }
 
-    const fs::path requested_system(system_directory);
-    std::vector<fs::path> candidates{requested_system};
-
-    if (!requested_system.is_absolute() && !base_path.empty()) {
-        candidates.push_back(base_path / requested_system);
-        candidates.push_back(base_path.parent_path() / requested_system);
+    const fs::path requested(system_directory);
+    std::vector<fs::path> candidates{requested};
+    if (!requested.is_absolute() && !base_path.empty()) {
+        candidates.push_back(base_path / requested);
+        candidates.push_back(base_path.parent_path() / requested);
     }
 
-    fs::path system_root;
-
+    std::error_code error;
     for (const fs::path& candidate : candidates) {
         error.clear();
-
-        if (fs::is_directory(candidate, error) && !error) {
-            system_root = candidate;
-            break;
-        }
+        if (fs::is_directory(candidate, error) && !error) return candidate;
     }
 
-    if (system_root.empty()) {
-        system_root = requested_system.is_absolute()
-            ? requested_system
-            : (base_path.empty()
-                ? fs::current_path()
-                : base_path) / requested_system;
-    }
-
-    const fs::path bios_directory = system_root / "swanstation" / "bios";
-    error.clear();
-    fs::create_directories(bios_directory, error);
-
-    if (error) {
-        const std::string message =
-            "Could not create the PS1 BIOS folder:\n" +
-            bios_directory.string() +
-            "\n\n" +
-            error.message();
-
-        SDL_ShowSimpleMessageBox(
-            SDL_MESSAGEBOX_ERROR,
-            "PS1 BIOS",
-            message.c_str(),
-            nullptr);
-
-        return false;
-    }
-
-    const fs::path destination = bios_directory / source.filename();
-    error.clear();
-
-    if (fs::equivalent(source, destination, error) && !error) {
-        SDL_ShowSimpleMessageBox(
-            SDL_MESSAGEBOX_INFORMATION,
-            "PS1 BIOS",
-            "That BIOS is already installed.",
-            nullptr);
-
-        return true;
-    }
-
-    error.clear();
-
-    fs::copy_file(
-        source,
-        destination,
-        fs::copy_options::overwrite_existing,
-        error);
-
-    if (error) {
-        const std::string message =
-            "Could not copy the PS1 BIOS:\n" +
-            error.message();
-
-        SDL_ShowSimpleMessageBox(
-            SDL_MESSAGEBOX_ERROR,
-            "PS1 BIOS",
-            message.c_str(),
-            nullptr);
-
-        return false;
-    }
-
-    const std::string message =
-        "PS1 BIOS installed to:\n" +
-        destination.string() +
-        "\n\nRestart the PS1 game if it is already running.";
-
-    SDL_ShowSimpleMessageBox(
-        SDL_MESSAGEBOX_INFORMATION,
-        "PS1 BIOS",
-        message.c_str(),
-        nullptr);
-
-    return true;
-#else
-    (void)system_directory;
-
-    SDL_ShowSimpleMessageBox(
-        SDL_MESSAGEBOX_INFORMATION,
-        "PS1 BIOS",
-        "Copy your legally dumped PS1 BIOS into "
-        "system/swanstation/bios.",
-        nullptr);
-
-    return false;
-#endif
+    if (requested.is_absolute()) return requested;
+    return (base_path.empty() ? fs::current_path() : base_path) / requested;
 }
 
-
-bool importPs2Bios(const std::string& system_directory) {
+// Opens the platform file picker filtered to BIOS dumps.
+std::string chooseBiosFile(const char* title) {
 #ifdef _WIN32
     char filename[32768] = {};
     OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter =
-        "PS2 BIOS images (*.bin;*.rom;*.bios)\0*.bin;*.rom;*.bios\0"
+        "BIOS images (*.bin;*.rom;*.bios)\0*.bin;*.rom;*.bios\0"
         "All files\0*.*\0";
     dialog.lpstrFile = filename;
     dialog.nMaxFile = static_cast<DWORD>(sizeof(filename));
     dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    dialog.lpstrTitle = "Select a PS2 BIOS dump you own";
+    dialog.lpstrTitle = title;
 
-    if (!GetOpenFileNameA(&dialog)) return false;
+    if (GetOpenFileNameA(&dialog)) return filename;
+#else
+    (void)title;
+    std::fprintf(stderr,
+                 "The BIOS picker is currently implemented for Windows only.\n");
+#endif
+    return {};
+}
 
-    std::error_code error;
-    const fs::path source = fs::absolute(fs::path(filename), error);
-    if (error || !fs::is_regular_file(source, error) || error) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
-                                 "The selected file could not be read.", nullptr);
-        return false;
-    }
+bool importBios(emu::frontend::BiosSystem target,
+                const std::string& system_directory) {
+    const char* const label =
+        target == emu::frontend::BiosSystem::Ps1 ? "PS1 BIOS" : "PS2 BIOS";
 
-    fs::path base_path;
-    if (char* raw_base = SDL_GetBasePath()) {
-        base_path = raw_base;
-        SDL_free(raw_base);
-    }
+#ifndef _WIN32
+    (void)system_directory;
+    const char* const folder =
+        target == emu::frontend::BiosSystem::Ps1
+            ? "system/swanstation/bios"
+            : "system/pcsx2/bios";
+    SDL_ShowSimpleMessageBox(
+        SDL_MESSAGEBOX_INFORMATION, label,
+        (std::string("Copy your legally dumped BIOS into ") + folder + ".")
+            .c_str(),
+        nullptr);
+    return false;
+#else
+    const std::string source = chooseBiosFile(
+        target == emu::frontend::BiosSystem::Ps1
+            ? "Select a PS1 BIOS dump you own"
+            : "Select a PS2 BIOS dump you own");
+    if (source.empty()) return false;
 
-    const fs::path requested_system(system_directory);
-    std::vector<fs::path> candidates{requested_system};
-    if (!requested_system.is_absolute() && !base_path.empty()) {
-        candidates.push_back(base_path / requested_system);
-        candidates.push_back(base_path.parent_path() / requested_system);
-    }
+    emu::frontend::BiosManager manager(resolveSystemRoot(system_directory));
+    const emu::frontend::BiosStatus before = manager.check(target);
 
-    fs::path system_root;
-    for (const fs::path& candidate : candidates) {
-        error.clear();
-        if (fs::is_directory(candidate, error) && !error) {
-            system_root = candidate;
-            break;
-        }
-    }
-    if (system_root.empty()) {
-        system_root = requested_system.is_absolute()
-            ? requested_system
-            : (base_path.empty() ? fs::current_path() : base_path) / requested_system;
-    }
-
-    const fs::path bios_directory = system_root / "pcsx2" / "bios";
-    error.clear();
-    fs::create_directories(bios_directory, error);
-    if (error) {
-        const std::string message = "Could not create the BIOS folder:\n" +
-                                    bios_directory.string() + "\n\n" + error.message();
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
-                                 message.c_str(), nullptr);
-        return false;
-    }
-
-    const fs::path destination = bios_directory / source.filename();
-    error.clear();
-    if (fs::equivalent(source, destination, error) && !error) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
-                                 "That BIOS file is already in the emulator's BIOS folder.",
+    std::string error;
+    if (!manager.import(target, source, error)) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, label, error.c_str(),
                                  nullptr);
-        return true;
-    }
-
-    error.clear();
-    fs::copy_file(source, destination, fs::copy_options::overwrite_existing, error);
-    if (error) {
-        const std::string message = "Could not copy the BIOS file:\n" + error.message();
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "PS2 BIOS",
-                                 message.c_str(), nullptr);
         return false;
     }
 
-    const std::string message = "BIOS imported to:\n" + destination.string() +
+    const emu::frontend::BiosStatus after = manager.check(target);
+    const std::string message =
+        (before.installed && before.path == after.path
+             ? std::string("That BIOS is already installed:\n")
+             : std::string("BIOS installed to:\n")) +
+        after.path.string() +
         "\n\nRestart the game if it is already running.";
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, label,
                              message.c_str(), nullptr);
     return true;
-#else
-    (void)system_directory;
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "PS2 BIOS",
-        "Use the system file picker to copy your legally dumped BIOS into "
-        "system/pcsx2/bios.", nullptr);
-    return false;
 #endif
 }
+
+#ifdef _WIN32
+// Downloads url into destination. Returns true only when a regular file
+// landed on disk; any partial download is removed on failure.
+bool downloadTo(const std::string& url, const fs::path& destination) {
+    using UrlDownloadToFileFn = HRESULT (*)(
+        void*, const char*, const char*, unsigned long, void*);
+    HMODULE urlmon = LoadLibraryA("urlmon.dll");
+    const auto download = urlmon
+        ? reinterpret_cast<UrlDownloadToFileFn>(
+            reinterpret_cast<void*>(
+                GetProcAddress(urlmon, "URLDownloadToFileA")))
+        : nullptr;
+    const HRESULT result = download
+        ? download(nullptr, url.c_str(), destination.string().c_str(), 0,
+                   nullptr)
+        : E_FAIL;
+    if (urlmon) FreeLibrary(urlmon);
+
+    std::error_code error;
+    if (FAILED(result) || !fs::is_regular_file(destination, error) || error) {
+        std::error_code cleanup_error;
+        fs::remove(destination, cleanup_error);
+        return false;
+    }
+    return true;
+}
+#endif
 
 bool installCoreFiles(const std::string& server_url) {
 #ifdef _WIN32
@@ -1870,29 +1980,62 @@ bool installCoreFiles(const std::string& server_url) {
         "pcsx2_libretro.dll"
     };
 
+    // Fetch and parse the manifest before touching any core file.
+    const fs::path manifest_temp = core_directory / "manifest.txt.download";
+    if (!downloadTo(base_url + "/manifest.txt", manifest_temp)) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
+            "The core server has no manifest.txt. Refusing to install "
+            "unverified cores.", nullptr);
+        return false;
+    }
+    std::map<std::string, std::string> expected;  // filename -> sha256
+    {
+        std::ifstream manifest(manifest_temp);
+        std::string digest, filename;
+        while (manifest >> digest >> filename) {
+            for (char& c : digest)
+                c = static_cast<char>(std::tolower(
+                    static_cast<unsigned char>(c)));
+            // Reject path traversal: manifests name bare files only.
+            if (filename.find('/') != std::string::npos ||
+                filename.find('\\') != std::string::npos ||
+                filename.find("..") != std::string::npos) {
+                continue;
+            }
+            expected[filename] = digest;
+        }
+    }
+    std::error_code ignored;
+    fs::remove(manifest_temp, ignored);
+
     for (const std::string& filename : files) {
+        const auto entry = expected.find(filename);
+        if (entry == expected.end()) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
+                ("manifest.txt does not list " + filename).c_str(), nullptr);
+            return false;
+        }
+
         const std::string url = base_url + "/" + filename;
         const fs::path destination = core_directory / filename;
         const fs::path temporary = destination.string() + ".download";
         std::error_code cleanup_error;
-        using UrlDownloadToFileFn = HRESULT (*)(
-            void*, const char*, const char*, unsigned long, void*);
-        HMODULE urlmon = LoadLibraryA("urlmon.dll");
-        const auto download = urlmon
-            ? reinterpret_cast<UrlDownloadToFileFn>(
-                GetProcAddress(urlmon, "URLDownloadToFileA"))
-            : nullptr;
-        const HRESULT result = download
-            ? download(nullptr, url.c_str(), temporary.string().c_str(), 0, nullptr)
-            : E_FAIL;
-        if (urlmon) FreeLibrary(urlmon);
-        if (FAILED(result) || !fs::is_regular_file(temporary)) {
-            fs::remove(temporary, cleanup_error);
+        if (!downloadTo(url, temporary)) {
             SDL_ShowSimpleMessageBox(
                 SDL_MESSAGEBOX_ERROR, "Core installation",
                 ("Could not download:\n" + url).c_str(), nullptr);
             return false;
         }
+
+        const std::string actual = emu::frontend::sha256File(temporary);
+        if (actual.empty() || actual != entry->second) {
+            fs::remove(temporary, cleanup_error);
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
+                ("Checksum mismatch for " + filename +
+                 "\nThe download was rejected and deleted.").c_str(), nullptr);
+            return false;
+        }
+
         std::error_code replace_error;
         fs::remove(destination, replace_error);
         replace_error.clear();

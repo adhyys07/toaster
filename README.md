@@ -95,6 +95,46 @@ Keyboard controls during Libretro gameplay:
 | Fullscreen | F11 |
 | Exit | Escape |
 
+Keyboard controls during built-in core gameplay (NES, Game Boy, CHIP-8):
+
+| Action | Key |
+|---|---|
+| Buttons and D-pad | As configured in Settings → Configure Controller |
+| Pause menu | F1, then Up/Down and Enter |
+| Close the pause menu | Escape or F1 |
+| Save state to slot 1-9 | Shift + F1 - F9 |
+| Load state from slot 1-9 | Ctrl + 1 - 9 |
+| Rewind | Hold Backspace |
+| Pause / frame advance | P / N |
+| Fast forward | Tab |
+| Volume down / up / mute | - / = / M |
+| Register view | F12 |
+| Fullscreen | F11 |
+| Exit | Escape |
+
+F1 opens the pause menu for both built-in and Libretro cores, which is why
+saving is on Shift + F1-F9. While the menu is open it takes the keyboard and
+the controller, so nothing reaches the game.
+
+Save states and rewind work on the NES, Game Boy, and CHIP-8 cores. States are
+written to a `states` folder beside the executable, and `rewind_seconds` in
+`settings.ini` controls how much history is kept (0 turns rewind off).
+
+### Per-game settings
+
+A `<game>.ini` beside a ROM overrides the global settings for that game only.
+Only the keys present in the file are applied, so a file can override one
+setting without resetting the rest:
+
+```ini
+show_fps=true
+integer_scale=false
+fast_forward_speed=4
+```
+
+Recognised keys are `scale`, `integer_scale`, `bilinear_filter`, `vsync`,
+`show_fps`, `mute_audio`, and `fast_forward_speed`.
+
 SDL-compatible game controllers are supported.
 
 ## Core installer

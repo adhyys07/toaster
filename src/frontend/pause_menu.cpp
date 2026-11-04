@@ -56,4 +56,16 @@ const std::string& PauseMenu::selectedLabel() const {
     return items_[selected_].label;
 }
 
+std::size_t PauseMenu::itemCount() const {
+    return items_.size();
+}
+
+std::size_t PauseMenu::selectedIndex() const {
+    return selected_;
+}
+
+const std::string& PauseMenu::itemLabel(std::size_t index) const {
+    return items_[index < items_.size() ? index : selected_].label;
+}
+
 }

@@ -39,6 +39,11 @@ public:
     PauseAction selectedAction() const;
     const std::string& selectedLabel() const;
 
+    // Enough of the item list for a caller to draw the menu itself.
+    std::size_t itemCount() const;
+    std::size_t selectedIndex() const;
+    const std::string& itemLabel(std::size_t index) const;
+
 private:
     std::vector<PauseMenuItem> items_;
     std::size_t selected_ = 0;

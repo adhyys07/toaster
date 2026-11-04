@@ -1,5 +1,6 @@
 #include "core/registry.h"
 #include "core/system.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -7,10 +8,16 @@
 static int g_failures = 0;
 static void check(bool ok, const char* what) {
     std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
+    std::fflush(stdout);
     if (!ok) ++g_failures;
 }
 
-static void exercise(const char* path, const char* expect_core, int w, int h) {
+// `state_advances` says whether this core's save state must differ after the
+// machine runs on. It is false for a core whose test ROM idles in a tight loop
+// and whose state holds no running clock, where returning to an identical
+// state is correct rather than a bug.
+static void exercise(const char* path, const char* expect_core, int w, int h,
+                     bool state_advances = true) {
     std::string err;
     emu::SystemPtr sys = emu::createForFile(path, err);
     if (!sys) { std::printf("  routing failed: %s\n", err.c_str()); ++g_failures; return; }
@@ -31,15 +38,42 @@ static void exercise(const char* path, const char* expect_core, int w, int h) {
     check(f.pixels != nullptr, "produces a framebuffer after running");
 
     std::vector<uint8_t> state;
-    const bool saved = sys->saveState(state);
-    if (std::string(expect_core) == "CHIP-8") {
-        check(saved && !state.empty(), "save state is produced");
-        sys->runFrame();
-        check(sys->loadState(state), "save state restores successfully");
-        check(sys->video().pixels != nullptr, "restored state has a framebuffer");
-    } else {
-        check(!saved, "unsupported cores reject save states explicitly");
+    check(sys->saveState(state) && !state.empty(), "produces a save state");
+
+    // Run on, then rewind. Comparing the framebuffer alone would pass on a
+    // core whose CPU was never restored, so the real check is that saving
+    // again after a load reproduces the original blob byte for byte.
+    const emu::VideoFrame before = sys->video();
+    std::vector<uint32_t> snapshot(
+        before.pixels, before.pixels + before.width * before.height);
+
+    for (int i = 0; i < 30; ++i) sys->runFrame();
+    if (state_advances) {
+        std::vector<uint8_t> advanced;
+        check(sys->saveState(advanced) && advanced != state,
+              "running the machine changes its state");
     }
+
+    check(sys->loadState(state), "save state restores successfully");
+    const emu::VideoFrame after = sys->video();
+    check(std::equal(snapshot.begin(), snapshot.end(), after.pixels),
+          "restored state reproduces the saved frame");
+
+    std::vector<uint8_t> resaved;
+    check(sys->saveState(resaved) && resaved == state,
+          "a load followed by a save round-trips exactly");
+
+    // A corrupt state must be rejected, not half-applied: the machine has to
+    // still match the state that was last loaded successfully.
+    std::vector<uint8_t> truncated(state.begin(),
+                                   state.begin() + state.size() / 2);
+    check(!sys->loadState(truncated), "truncated states are rejected");
+    std::vector<uint8_t> tampered = state;
+    tampered[0] ^= 0xFF;
+    check(!sys->loadState(tampered), "states with a bad magic are rejected");
+
+    check(sys->saveState(resaved) && resaved == state,
+          "a rejected state leaves the machine untouched");
 
     std::vector<float> buf(4096);
     size_t got = sys->readAudio(buf.data(), buf.size());
@@ -68,7 +102,11 @@ int main() {
     exercise("roms/bgtest.nes", "NES", 256, 240);
 
     std::printf("CHIP-8 core via the shell interface\n");
-    exercise("roms/fonttest.ch8", "CHIP-8", 64, 32);
+    // The CHIP-8 ROM draws one glyph and then jumps to itself forever.
+    exercise("roms/fonttest.ch8", "CHIP-8", 64, 32, /*state_advances=*/false);
+
+    std::printf("Game Boy core via the shell interface\n");
+    exercise("roms/regtest.gb", "GAME BOY", 160, 144);
 
     std::printf("\n%s (%d failure%s)\n",
                 g_failures == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",

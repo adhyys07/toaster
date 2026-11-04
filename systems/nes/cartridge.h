@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "../../src/core/serializer.h"
 
 namespace nes {
 
@@ -25,6 +26,8 @@ public:
     virtual bool prgRamEnabled() const { return true; }
     virtual bool prgRamWritable() const { return true; }
     virtual bool overridesMirroring() const { return false; }
+    virtual void saveState(emu::StateWriter& visit) const { (void)visit; }
+    virtual void loadState(emu::StateReader& visit) { (void)visit; }
     virtual Mirroring mirroring() const { return Mirroring::Horizontal; }
 protected:
     uint8_t prg_banks_ = 0;  // 16 KB banks
@@ -33,6 +36,15 @@ protected:
 
 class Cartridge {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        if (!prg_ram_.empty()) visit.block(prg_ram_.data(), prg_ram_.size());
+        if (chr_is_ram_ && !chr_.empty()) visit.block(chr_.data(), chr_.size());
+        visit(mirroring_);
+        if (!mapper_) return;
+        if constexpr (Visitor::saving) mapper_->saveState(visit);
+        else                           mapper_->loadState(visit);
+    }
     bool load(const std::string& path, std::string& error);
     void reset();
     bool cpuRead(uint16_t addr, uint8_t& data);

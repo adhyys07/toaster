@@ -62,7 +62,10 @@ bool loadGameMetadata(const std::filesystem::path& file_path,
     std::ifstream file(file_path);
     if (!file) return false;
 
-    GameMetadata loaded;
+    // Seed from the caller's value so a sidecar that sets only some keys
+    // overlays them instead of blanking the rest. Without this, a .meta file
+    // with no "path" line leaves the metadata with an empty path.
+    GameMetadata loaded = metadata;
     std::string line;
     while (std::getline(file, line)) {
         const auto equals = line.find('=');

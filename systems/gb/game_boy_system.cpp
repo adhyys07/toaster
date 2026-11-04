@@ -1,5 +1,6 @@
 #include "game_boy_system.h"
 
+#include "../../src/core/serializer.h"
 #include "apu.h"
 #include "cartridge.h"
 #include "cpu.h"
@@ -82,6 +83,53 @@ public:
         }
     }
 
+    bool saveState(std::vector<uint8_t>& out) const override {
+        if (!cartridge_.loaded()) return false;
+
+        StateWriter visit;
+        visit(kStateMagic);
+        visit(kStateVersion);
+        const uint32_t system_id = 2;  // 2 = Game Boy
+        visit(system_id);
+        const uint32_t cartridge_id = cartridgeId();
+        visit(cartridge_id);
+        // visitState mutates nothing when the visitor is a writer.
+        const_cast<GameBoySystem*>(this)->visitMachine(visit);
+        out = visit.take();
+        return !out.empty();
+    }
+
+    bool loadState(const std::vector<uint8_t>& in) override {
+        if (!cartridge_.loaded() || in.empty()) return false;
+
+        StateReader visit(in.data(), in.size());
+        uint32_t magic = 0, version = 0, system_id = 0, cartridge_id = 0;
+        visit(magic); visit(version); visit(system_id); visit(cartridge_id);
+        if (!visit.ok() || magic != kStateMagic || version != kStateVersion ||
+            system_id != 2 || cartridge_id != cartridgeId()) {
+            return false;
+        }
+
+        // Snapshot first: a truncated state must not leave a half-written
+        // machine behind.
+        std::vector<uint8_t> rollback;
+        if (!saveState(rollback)) return false;
+
+        visitMachine(visit);
+        if (!visit.ok()) {
+            StateReader undo(rollback.data(), rollback.size());
+            uint32_t discard = 0;
+            undo(discard); undo(discard); undo(discard); undo(discard);
+            visitMachine(undo);
+            return false;
+        }
+
+        // The APU holds a queue of generated samples that no longer matches
+        // the restored machine, so drop it.
+        apu_.reset();
+        return true;
+    }
+
     std::string debugInfo() const override {
         std::ostringstream stream;
         stream << "Game Boy: " << romInfo() << "\n"
@@ -100,6 +148,26 @@ public:
     }
 
 private:
+    // The APU is excluded: its only state is a queue of already-generated
+    // samples, which loadState drops instead of restoring.
+    template <typename Visitor>
+    void visitMachine(Visitor& visit) {
+        cpu_.visitState(visit);
+        memory_.visitState(visit);
+        timer_.visitState(visit);
+        ppu_.visitState(visit);
+        cartridge_.visitState(visit);
+    }
+
+    // FNV-1a over the cartridge title, so a state saved in one game is
+    // rejected when loaded into another.
+    uint32_t cartridgeId() const {
+        uint32_t hash = 2166136261u;
+        for (char ch : cartridge_.title())
+            hash = (hash ^ static_cast<uint8_t>(ch)) * 16777619u;
+        return hash;
+    }
+
     gb::Cartridge cartridge_;
     gb::Memory memory_;
     gb::Timer timer_;

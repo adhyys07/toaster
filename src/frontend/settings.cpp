@@ -15,6 +15,7 @@ namespace {
 Upscaler parseUpscaler(const std::string& value) {
     if (value == "linear") return Upscaler::Linear;
     if (value == "fsr1") return Upscaler::Fsr1;
+    if (value == "crt") return Upscaler::Crt;
     return Upscaler::Nearest;
 }
 
@@ -22,6 +23,7 @@ const char* upscalerValue(Upscaler mode) {
     switch (mode) {
     case Upscaler::Linear: return "linear";
     case Upscaler::Fsr1:   return "fsr1";
+    case Upscaler::Crt:    return "crt";
     case Upscaler::Nearest:
     default:               return "nearest";
     }
@@ -93,24 +95,31 @@ std::vector<std::string> listAudioDevices() {
 
 SDL_Rect calculateViewport(int window_width, int window_height,
                            int game_width, int game_height,
-                           const VideoSettings& settings) {
-    if (game_width <= 0 || game_height <= 0)
+                           double aspect_ratio, ScalingMode mode) {
+    if (game_width <= 0 || game_height <= 0 || window_width <= 0 ||
+        window_height <= 0) {
         return {0, 0, window_width, window_height};
+    }
+    if (mode == ScalingMode::Stretch)
+        return {0, 0, window_width, window_height};
+
+    if (mode == ScalingMode::Integer) {
+        const int scale = std::max(1, std::min(window_width / game_width,
+                                               window_height / game_height));
+        const int width = game_width * scale;
+        const int height = game_height * scale;
+        return {(window_width - width) / 2, (window_height - height) / 2,
+                width, height};
+    }
+
+    const double aspect = aspect_ratio > 0.0
+        ? aspect_ratio
+        : static_cast<double>(game_width) / game_height;
     int width = window_width;
-    int height = window_height;
-    if (settings.integer_scaling) {
-        const int scale = std::max(
-            1, std::min(window_width / game_width,
-                        window_height / game_height));
-        width = game_width * scale;
-        height = game_height * scale;
-    } else {
-        const double aspect = static_cast<double>(game_width) / game_height;
-        height = static_cast<int>(width / aspect);
-        if (height > window_height) {
-            height = window_height;
-            width = static_cast<int>(height * aspect);
-        }
+    int height = static_cast<int>(width / aspect);
+    if (height > window_height) {
+        height = window_height;
+        width = static_cast<int>(height * aspect);
     }
     return {(window_width - width) / 2, (window_height - height) / 2,
             width, height};
@@ -146,19 +155,26 @@ GameSettings loadGameSettings(const std::string& game_path) {
         try {
             if (key == "scale") {
                 settings.scale = std::clamp(std::stoi(value), 1, 8);
+                settings.present.scale = true;
             } else if (key == "integer_scale") {
                 settings.integer_scale = value == "true";
+                settings.present.integer_scale = true;
             } else if (key == "bilinear_filter") {
                 settings.bilinear_filter = value == "true";
+                settings.present.bilinear_filter = true;
             } else if (key == "vsync") {
                 settings.vsync = value == "true";
+                settings.present.vsync = true;
             } else if (key == "show_fps") {
                 settings.show_fps = value == "true";
+                settings.present.show_fps = true;
             } else if (key == "mute_audio") {
                 settings.mute_audio = value == "true";
+                settings.present.mute_audio = true;
             } else if (key == "fast_forward_speed") {
                 settings.fast_forward_speed =
                     std::clamp(std::stoi(value), 1, 8);
+                settings.present.fast_forward_speed = true;
             }
         } catch (const std::exception&) {
             continue;
@@ -396,6 +412,12 @@ Settings loadSettings() {
             } catch (...) {
                 settings.sharpness = 0.2f;
             }
+        } else if (key == "rewind_seconds") {
+            try {
+                settings.rewind_seconds = std::clamp(std::stoi(value), 0, 120);
+            } catch (...) {
+                settings.rewind_seconds = 10;
+            }
         } else if (key.rfind("pad_button_", 0) == 0) {
             try {
                 const int index = std::stoi(key.substr(11));
@@ -422,6 +444,7 @@ bool saveSettings(const Settings& settings) {
          << "upscaler=" << upscalerValue(settings.upscaler) << '\n'
          << "scaling=" << scalingValue(settings.scaling) << '\n'
         << "sharpness=" << std::clamp(settings.sharpness, 0.0f, 1.0f) << '\n'
+        << "rewind_seconds=" << std::clamp(settings.rewind_seconds, 0, 120) << '\n'
         << "volume=" << std::clamp(settings.volume, 0, 100) << '\n'
         << "audio_buffer_samples="
         << std::clamp(settings.audio_buffer_samples, 256, 4096) << '\n'
@@ -438,17 +461,15 @@ const char* upscalerName(Upscaler mode) {
     switch (mode) {
     case Upscaler::Linear: return "Linear";
     case Upscaler::Fsr1:   return "FSR 1 (OpenGL required)";
+    case Upscaler::Crt:    return "CRT (OpenGL required)";
     case Upscaler::Nearest:
     default:               return "Nearest";
     }
 }
 
 void cycleUpscaler(Settings& settings) {
-    switch (settings.upscaler) {
-    case Upscaler::Nearest: settings.upscaler = Upscaler::Linear; break;
-    case Upscaler::Linear:  settings.upscaler = Upscaler::Fsr1; break;
-    case Upscaler::Fsr1:    settings.upscaler = Upscaler::Nearest; break;
-    }
+    settings.upscaler = static_cast<Upscaler>(
+        (static_cast<int>(settings.upscaler) + 1) % kUpscalerCount);
 }
 
 const char* scalingName(ScalingMode mode) {

@@ -8,6 +8,13 @@ namespace emu::gb {
 
 class PPU {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit(cycles_); visit(line_);
+        visit.block(framebuffer_.data(),
+                    framebuffer_.size() * sizeof(uint32_t));
+    }
+
     explicit PPU(Memory& memory);
 
     void reset();

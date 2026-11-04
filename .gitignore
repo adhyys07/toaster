@@ -41,3 +41,13 @@ toaster-windows-x64.zip
 __pycache__/
 /services/library_server/*.sqlite
 /services/library_server/*.sqlite-*
+
+# Build and tool noise
+compiler.log
+*.sqlite
+*.sqlite-journal
+/favorites.txt
+
+# Screenshots and cheats produced at runtime
+/screenshots/
+/cheats/

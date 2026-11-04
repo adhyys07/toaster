@@ -21,6 +21,20 @@ enum Button : uint8_t {
 
 class Bus {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit.block(ram_, sizeof(ram_));
+        visit.block(controller_, sizeof(controller_));
+        visit.block(controller_shift_, sizeof(controller_shift_));
+        visit(clock_counter_);
+        visit(dma_active_); visit(dma_sync_);
+        visit(dma_page_); visit(dma_addr_); visit(dma_data_);
+        cpu.visitState(visit);
+        ppu.visitState(visit);
+        apu.visitState(visit);
+        if (cart) cart->visitState(visit);
+    }
+
     Bus();
 
     void insertCartridge(Cartridge* cart);

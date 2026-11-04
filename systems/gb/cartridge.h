@@ -9,6 +9,13 @@ namespace emu::gb {
 
 class Cartridge {
 public:
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        if (!ram_.empty()) visit.block(ram_.data(), ram_.size());
+        visit(ram_enabled_); visit(rom_bank_low_);
+        visit(bank_high_); visit(banking_mode_);
+    }
+
     bool load(const std::string& path, std::string& error);
 
     uint8_t read(uint16_t addr) const;
