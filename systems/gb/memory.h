@@ -4,28 +4,24 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 
 namespace emu::gb {
 
+class APU;
+class PPU;
+class Timer;
+
+// The address decoder. Registers whose writes have side effects live in the
+// component that owns them -- the timer's divider, the PPU's line counter, the
+// APU's channel triggers -- and are reached from here, so no component has to
+// drive another one's hardware through a plain memory write.
 class Memory {
 public:
-    template <typename Visitor>
-    void visitState(Visitor& visit) {
-        visit.block(vram_.data(), vram_.size());
-        visit.block(wram_.data(), wram_.size());
-        visit.block(hram_.data(), hram_.size());
-        visit.block(oam_.data(), oam_.size());
-        visit(joypad_select_); visit(buttons_);
-        visit(div_); visit(tima_); visit(tma_); visit(tac_);
-        visit(lcd_control_); visit(lcd_status_);
-        visit(scroll_y_); visit(scroll_x_);
-        visit(current_line_); visit(line_compare_);
-        visit(interrupt_flags_); visit(interrupt_enable_);
-    }
-
     Memory();
 
     void connect(Cartridge* cartridge);
+    void connect(PPU* ppu, APU* apu, Timer* timer);
     void reset();
 
     uint8_t read(uint16_t address);
@@ -36,21 +32,42 @@ public:
 
     uint8_t interruptFlags() const;
     void requestInterrupt(uint8_t mask);
+    void clearInterrupt(uint8_t mask);
 
     uint8_t interruptEnable() const;
     void setInterruptEnable(uint8_t value);
 
-    uint8_t& timerDiv() { return div_; }
-    uint8_t& timerTima() { return tima_; }
-    uint8_t& timerTma() { return tma_; }
-    uint8_t& timerTac() { return tac_; }
-
+    // Video memory, for the PPU. Going through read() for every pixel fetch
+    // would be both slow and wrong, since the decoder can block VRAM by mode.
     uint8_t* vram() { return vram_.data(); }
-    uint8_t* wram() { return wram_.data(); }
+    const uint8_t* vram() const { return vram_.data(); }
     uint8_t* oam() { return oam_.data(); }
+    const uint8_t* oam() const { return oam_.data(); }
+
+    template <typename Visitor>
+    void visitState(Visitor& visit) {
+        visit.block(vram_.data(), vram_.size());
+        visit.block(wram_.data(), wram_.size());
+        visit.block(hram_.data(), hram_.size());
+        visit.block(oam_.data(), oam_.size());
+        visit(joypad_select_);
+        visit(buttons_);
+        visit(interrupt_flags_);
+        visit(interrupt_enable_);
+        visit(serial_data_);
+        visit(serial_control_);
+    }
+
+    // Blargg's test ROMs report their results over the serial port, so the
+    // bytes written there are collected rather than dropped.
+    const std::string& serialOutput() const { return serial_output_; }
+    void clearSerialOutput() { serial_output_.clear(); }
 
 private:
     Cartridge* cartridge_ = nullptr;
+    PPU* ppu_ = nullptr;
+    APU* apu_ = nullptr;
+    Timer* timer_ = nullptr;
 
     std::array<uint8_t, 0x2000> vram_{};
     std::array<uint8_t, 0x2000> wram_{};
@@ -60,19 +77,12 @@ private:
     uint8_t joypad_select_ = 0x30;
     uint8_t buttons_ = 0xFF;
 
-    uint8_t div_ = 0;
-    uint8_t tima_ = 0;
-    uint8_t tma_ = 0;
-    uint8_t tac_ = 0;
-    uint8_t lcd_control_ = 0x91;
-    uint8_t lcd_status_ = 0x85;
-    uint8_t scroll_y_ = 0;
-    uint8_t scroll_x_ = 0;
-    uint8_t current_line_ = 0;
-    uint8_t line_compare_ = 0;
-
     uint8_t interrupt_flags_ = 0;
     uint8_t interrupt_enable_ = 0;
+
+    uint8_t serial_data_ = 0;
+    uint8_t serial_control_ = 0;
+    std::string serial_output_;
 };
 
 } // namespace emu::gb

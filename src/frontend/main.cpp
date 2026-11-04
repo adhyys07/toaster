@@ -462,7 +462,7 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
                          36, 480, muted);
             drawMenuText(renderer, font, "FSR 1 uses OpenGL EASU + RCAS passes.",
                          36, 512, muted);
-            drawMenuText(renderer, font, "NES supports mappers 0, 1, 2, 3, 4, 7; MMC3 IRQ timing is approximate.",
+            drawMenuText(renderer, font, "NES mappers 0-4 and 7. Game Boy: MBC1, MBC2, MBC3 and MBC5, no Color.",
                          36, 544, muted, 680);
             drawMenuText(renderer, font, "PICO-8 still requires a separate compatible core.",
                          36, 592, muted, 680);
@@ -803,7 +803,25 @@ std::string showGameMenu(const fs::path& folder,
                          "F toggles favorite. / searches. Double-click or Enter launches.",
                          28, 602, muted, 820);
 
-            SDL_RenderPresent(menu_renderer);
+            const SDL_Rect art_box{detail_x + 16, detail_y + 16, 220, 300};
+            if (SDL_Texture* art = cache.get(game.artwork)) {
+                int art_w = 0, art_h = 0;
+                SDL_QueryTexture(art, nullptr, nullptr, &art_w, &art_h);
+                const double scale = std::min(
+                    static_cast<double>(art_box.w) / art_w,
+                    static_cast<double>(art_box.h) / art_h);
+                SDL_Rect fit{0, 0, static_cast<int>(art_w * scale),
+                                   static_cast<int>(art_h * scale)};
+                fit.x = art_box.x + (art_box.w - fit.w) / 2;
+                fit.y = art_box.y + (art_box.h - fit.h) / 2;
+                SDL_RenderCopy(menu_renderer, art, nullptr, &fit);
+            } else {
+                SDL_SetRenderDrawColor(menu_renderer, 28, 32, 40, 255);
+                SDL_RenderFillRect(menu_renderer, &art_box);
+                drawMenuText(menu_renderer, font, "No artwork",
+                             art_box.x + 60, art_box.y + 140, grey);
+            }
+
             redraw = false;
         }
 

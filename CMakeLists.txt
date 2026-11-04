@@ -12,6 +12,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+        "Build type; RelWithDebInfo keeps symbols and still optimizes" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY
+                 STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 if(MSVC)
     add_compile_options(/W4)
 else()
@@ -57,6 +64,11 @@ add_executable(binding_tests systems/test_bindings.cpp)
 target_link_libraries(binding_tests PRIVATE emu_core)
 add_test(NAME bindings COMMAND binding_tests)
 set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+add_executable(gb_tests systems/gb/test_gb.cpp)
+target_link_libraries(gb_tests PRIVATE emu_core)
+add_test(NAME gameboy COMMAND gb_tests)
+set_tests_properties(gameboy PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 find_package(SDL2 REQUIRED)
 add_executable(settings_tests
@@ -138,6 +150,17 @@ else()
         target_link_libraries(emu PRIVATE Threads::Threads)
     endif()
 endif()
+
+find_package(SDL2_image REQUIRED)
+if(TARGET SDL2_image::SDL2_image)
+    target_link_libraries(emu PRIVATE SDL2_image::SDL2_image)
+else()
+    find_path(SDL2_IMAGE_INCLUDE_DIR SDL_image.h PATH_SUFFIXES SDL2)
+    find_library(SDL2_IMAGE_LINK_LIBRARY NAMES SDL2_image)
+    target_include_directories(emu PRIVATE "${SDL2_IMAGE_INCLUDE_DIR}")
+    target_link_libraries(emu PRIVATE "${SDL2_IMAGE_LINK_LIBRARY}")
+endif()
+
 
 find_package(SDL2_ttf REQUIRED)
 if(TARGET SDL2_ttf::SDL2_ttf)

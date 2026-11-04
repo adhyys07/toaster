@@ -9,7 +9,20 @@ Toaster is a small retro-game frontend for:
 - PSP
 - PlayStation 2
 
-PS1, PSP, and PS2 support uses external Libretro cores.
+NES, CHIP-8 and Game Boy run on built-in cores. PS1, PSP, and PS2 support uses
+external Libretro cores.
+
+### Built-in core coverage
+
+| Core | Supported |
+|---|---|
+| NES | Mappers 0, 1, 2, 3, 4 and 7; sprites; 4 of 5 APU channels (no DMC). MMC3 IRQ timing is per-scanline rather than per PPU A12 edge. |
+| Game Boy | The full instruction set; background, window and sprites with 10-per-line and DMG priority; all four sound channels; MBC1, MBC2, MBC3 (with clock) and MBC5; battery saves to `.srm`. |
+| CHIP-8 | Complete. |
+
+The Game Boy video unit draws a whole scanline when the controller enters
+mode 3, so mid-line scroll and palette tricks used by a few games for raster
+effects are not reproduced. Game Boy Color is not supported.
 
 ## Quick start
 
@@ -119,6 +132,9 @@ the controller, so nothing reaches the game.
 Save states and rewind work on the NES, Game Boy, and CHIP-8 cores. States are
 written to a `states` folder beside the executable, and `rewind_seconds` in
 `settings.ini` controls how much history is kept (0 turns rewind off).
+
+Game Boy cartridge RAM is written to `<game>.srm` next to the ROM when the
+game exits, so in-game saves survive. NES battery saves use `<game>.sav`.
 
 ### Per-game settings
 

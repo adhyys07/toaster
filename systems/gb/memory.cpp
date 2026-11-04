@@ -1,6 +1,8 @@
 #include "memory.h"
 
-#include <algorithm>
+#include "apu.h"
+#include "ppu.h"
+#include "timer.h"
 
 namespace emu::gb {
 
@@ -12,6 +14,12 @@ void Memory::connect(Cartridge* cartridge) {
     cartridge_ = cartridge;
 }
 
+void Memory::connect(PPU* ppu, APU* apu, Timer* timer) {
+    ppu_ = ppu;
+    apu_ = apu;
+    timer_ = timer;
+}
+
 void Memory::reset() {
     vram_.fill(0);
     wram_.fill(0);
@@ -21,43 +29,48 @@ void Memory::reset() {
     joypad_select_ = 0x30;
     buttons_ = 0xFF;
 
-    div_ = 0;
-    tima_ = 0;
-    tma_ = 0;
-    tac_ = 0;
-    lcd_control_ = 0x91;
-    lcd_status_ = 0x85;
-    scroll_y_ = 0;
-    scroll_x_ = 0;
-    current_line_ = 0;
-    line_compare_ = 0;
-
     interrupt_flags_ = 0;
     interrupt_enable_ = 0;
+
+    serial_data_ = 0;
+    serial_control_ = 0;
+    serial_output_.clear();
 }
 
 uint8_t Memory::joypad() const {
-    uint8_t result = 0xC0 | joypad_select_;
+    uint8_t result = static_cast<uint8_t>(0xC0 | joypad_select_);
 
+    // A zero in the select bit picks that half, and a pressed button reads
+    // as zero, which is why buttons_ is stored inverted by the caller.
     if ((joypad_select_ & 0x10) == 0) {
         result |= buttons_ & 0x0F;
-    } else {
+    } else if ((joypad_select_ & 0x20) == 0) {
         result |= (buttons_ >> 4) & 0x0F;
+    } else {
+        result |= 0x0F;
     }
 
     return result;
 }
 
 void Memory::setButtons(uint8_t buttons) {
+    // A bit going from 1 to 0 is a key being pressed, which raises the joypad
+    // interrupt. Games use it to wake from STOP and from HALT.
+    const uint8_t newly_pressed = static_cast<uint8_t>(buttons_ & ~buttons);
     buttons_ = buttons;
+    if (newly_pressed != 0) requestInterrupt(0x10);
 }
 
 uint8_t Memory::interruptFlags() const {
-    return interrupt_flags_ | 0xE0;
+    return static_cast<uint8_t>(interrupt_flags_ | 0xE0);
 }
 
 void Memory::requestInterrupt(uint8_t mask) {
-    interrupt_flags_ |= mask;
+    interrupt_flags_ |= mask & 0x1F;
+}
+
+void Memory::clearInterrupt(uint8_t mask) {
+    interrupt_flags_ &= static_cast<uint8_t>(~mask);
 }
 
 uint8_t Memory::interruptEnable() const {
@@ -86,6 +99,7 @@ uint8_t Memory::read(uint16_t address) {
     }
 
     if (address < 0xFE00) {
+        // Echo RAM mirrors C000-DDFF.
         return wram_[address - 0xE000];
     }
 
@@ -94,21 +108,25 @@ uint8_t Memory::read(uint16_t address) {
     }
 
     if (address < 0xFF00) {
-        return 0xFF;
+        return 0x00;
     }
 
     if (address == 0xFF00) return joypad();
-    if (address == 0xFF04) return div_;
-    if (address == 0xFF05) return tima_;
-    if (address == 0xFF06) return tma_;
-    if (address == 0xFF07) return tac_;
-    if (address == 0xFF40) return lcd_control_;
-    if (address == 0xFF41) return lcd_status_;
-    if (address == 0xFF42) return scroll_y_;
-    if (address == 0xFF43) return scroll_x_;
-    if (address == 0xFF44) return current_line_;
-    if (address == 0xFF45) return line_compare_;
+    if (address == 0xFF01) return serial_data_;
+    if (address == 0xFF02) return static_cast<uint8_t>(serial_control_ | 0x7E);
     if (address == 0xFF0F) return interruptFlags();
+
+    if (address >= 0xFF04 && address <= 0xFF07) {
+        return timer_ ? timer_->read(address) : 0xFF;
+    }
+
+    if (address >= 0xFF10 && address <= 0xFF3F) {
+        return apu_ ? apu_->read(address) : 0xFF;
+    }
+
+    if (address >= 0xFF40 && address <= 0xFF4B) {
+        return ppu_ ? ppu_->read(address) : 0xFF;
+    }
 
     if (address >= 0xFF80 && address < 0xFFFF) {
         return hram_[address - 0xFF80];
@@ -161,59 +179,42 @@ void Memory::write(uint16_t address, uint8_t value) {
         return;
     }
 
-    if (address == 0xFF04) {
-        div_ = 0;
+    if (address == 0xFF01) {
+        serial_data_ = value;
         return;
     }
 
-    if (address == 0xFF05) {
-        tima_ = value;
-        return;
-    }
-
-    if (address == 0xFF06) {
-        tma_ = value;
-        return;
-    }
-
-    if (address == 0xFF07) {
-        tac_ = value & 0x07;
-        return;
-    }
-
-    if (address == 0xFF40) {
-        lcd_control_ = value;
-        return;
-    }
-
-    if (address == 0xFF41) {
-        lcd_status_ = static_cast<uint8_t>((lcd_status_ & 0x07) |
-                                            (value & 0x78));
-        return;
-    }
-
-    if (address == 0xFF42) {
-        scroll_y_ = value;
-        return;
-    }
-
-    if (address == 0xFF43) {
-        scroll_x_ = value;
-        return;
-    }
-
-    if (address == 0xFF44) {
-        current_line_ = 0;
-        return;
-    }
-
-    if (address == 0xFF45) {
-        line_compare_ = value;
+    if (address == 0xFF02) {
+        serial_control_ = value;
+        // Starting a transfer with the internal clock publishes the byte and
+        // completes immediately; nothing is attached to receive it.
+        if ((value & 0x81) == 0x81) {
+            if (serial_output_.size() < 4096) {
+                serial_output_.push_back(static_cast<char>(serial_data_));
+            }
+            serial_control_ = static_cast<uint8_t>(value & 0x7F);
+            requestInterrupt(0x08);
+        }
         return;
     }
 
     if (address == 0xFF0F) {
         interrupt_flags_ = value & 0x1F;
+        return;
+    }
+
+    if (address >= 0xFF04 && address <= 0xFF07) {
+        if (timer_) timer_->write(address, value);
+        return;
+    }
+
+    if (address >= 0xFF10 && address <= 0xFF3F) {
+        if (apu_) apu_->write(address, value);
+        return;
+    }
+
+    if (address >= 0xFF40 && address <= 0xFF4B) {
+        if (ppu_) ppu_->write(address, value);
         return;
     }
 

@@ -8,27 +8,41 @@
 #include "ppu.h"
 #include "timer.h"
 
+#include <cstdio>
 #include <iomanip>
 #include <sstream>
 
 namespace emu{
 namespace{
 
+// One frame is 154 lines of 456 dots.
+constexpr unsigned kCyclesPerFrame = 70224;
+
 class GameBoySystem final : public System {
 public:
     GameBoySystem()
         : memory_(),
           timer_(memory_),
-          cpu_(memory_, timer_),
           ppu_(memory_),
-          apu_(memory_) {
+          apu_(),
+          cpu_(memory_, timer_, ppu_, apu_) {
         memory_.connect(&cartridge_);
+        memory_.connect(&ppu_, &apu_, &timer_);
+    }
+
+    ~GameBoySystem() override {
+        if (!rom_path_.empty() && !cartridge_.saveBattery(rom_path_)) {
+            std::fprintf(stderr, "Could not save Game Boy cartridge RAM\n");
+        }
     }
 
     const char* name() const override { return "GAME BOY"; }
 
     std::string romInfo() const override {
-        return cartridge_.loaded() ? cartridge_.title() : std::string{};
+        if (!cartridge_.loaded()) return {};
+        std::string info = cartridge_.title();
+        if (cartridge_.hasBattery()) info += " (battery)";
+        return info;
     }
 
     bool loadRom(const std::string& path, std::string& error) override {
@@ -37,6 +51,12 @@ public:
         }
 
         reset();
+        if (!cartridge_.loadBattery(path)) {
+            error = "could not load Game Boy cartridge RAM";
+            return false;
+        }
+
+        rom_path_ = path;
         return true;
     }
 
@@ -44,20 +64,21 @@ public:
         memory_.reset();
         cartridge_.reset();
         timer_.reset();
-        cpu_.reset();
         ppu_.reset();
         apu_.reset();
+        cpu_.reset();
     }
 
     void runFrame() override {
-        constexpr unsigned cyclesPerFrame = 70224;
-        unsigned cycles = 0;
+        ppu_.clearFrameComplete();
 
-        while (cycles < cyclesPerFrame) {
+        // Normally the PPU entering vblank ends the frame. The cycle cap is a
+        // backstop for a ROM that switches the LCD off, where the controller
+        // never reaches vblank at all.
+        unsigned cycles = 0;
+        while (!ppu_.frameComplete() && cycles < kCyclesPerFrame) {
             const unsigned executed = cpu_.step();
-            ppu_.tick(executed);
-            apu_.tick(executed);
-            cycles += executed;
+            cycles += executed > 0 ? executed : 4;
         }
     }
 
@@ -78,9 +99,29 @@ public:
     }
 
     void setInput(int port, uint32_t state) override {
-        if (port == 0) {
-            cpu_.setInput(static_cast<uint8_t>(~state));
-        }
+        if (port != 0) return;
+
+        // The shell reports A, B, Start, Select, Up, Down, Left, Right in bits
+        // 0..7. The hardware register splits them into two nibbles, directions
+        // low and actions high, where a pressed key reads as zero -- so this
+        // is a remap, not just an inversion.
+        uint8_t joypad = 0xFF;
+        const auto press = [&](int shell_bit, int hardware_bit) {
+            if (state & (1u << shell_bit)) {
+                joypad = static_cast<uint8_t>(joypad & ~(1u << hardware_bit));
+            }
+        };
+
+        press(7, 0);  // Right
+        press(6, 1);  // Left
+        press(4, 2);  // Up
+        press(5, 3);  // Down
+        press(0, 4);  // A
+        press(1, 5);  // B
+        press(3, 6);  // Select
+        press(2, 7);  // Start
+
+        cpu_.setInput(joypad);
     }
 
     bool saveState(std::vector<uint8_t>& out) const override {
@@ -123,18 +164,14 @@ public:
             visitMachine(undo);
             return false;
         }
-
-        // The APU holds a queue of generated samples that no longer matches
-        // the restored machine, so drop it.
-        apu_.reset();
         return true;
     }
 
     std::string debugInfo() const override {
         std::ostringstream stream;
         stream << "Game Boy: " << romInfo() << "\n"
-               << "PC=" << std::hex << std::uppercase
-               << std::setw(4) << std::setfill('0') << cpu_.pc()
+               << std::hex << std::uppercase << std::setfill('0')
+               << "PC=" << std::setw(4) << cpu_.pc()
                << " SP=" << std::setw(4) << cpu_.sp()
                << " AF=" << std::setw(2) << static_cast<unsigned>(cpu_.a())
                << std::setw(2) << static_cast<unsigned>(cpu_.f())
@@ -143,19 +180,24 @@ public:
                << " DE=" << std::setw(2) << static_cast<unsigned>(cpu_.d())
                << std::setw(2) << static_cast<unsigned>(cpu_.e())
                << " HL=" << std::setw(2) << static_cast<unsigned>(cpu_.h())
-               << std::setw(2) << static_cast<unsigned>(cpu_.l());
+               << std::setw(2) << static_cast<unsigned>(cpu_.l())
+               << std::dec
+               << "\nLY=" << static_cast<unsigned>(ppu_.line())
+               << " mode=" << static_cast<unsigned>(ppu_.mode())
+               << (cpu_.halted() ? " halted" : "");
         return stream.str();
     }
 
 private:
-    // The APU is excluded: its only state is a queue of already-generated
-    // samples, which loadState drops instead of restoring.
+    // The APU's only remaining state is a queue of already-generated samples,
+    // which a load drops rather than restores.
     template <typename Visitor>
     void visitMachine(Visitor& visit) {
         cpu_.visitState(visit);
         memory_.visitState(visit);
         timer_.visitState(visit);
         ppu_.visitState(visit);
+        apu_.visitState(visit);
         cartridge_.visitState(visit);
     }
 
@@ -168,12 +210,16 @@ private:
         return hash;
     }
 
+    // Declaration order is construction order: everything the CPU refers to
+    // has to exist before it does.
     gb::Cartridge cartridge_;
     gb::Memory memory_;
     gb::Timer timer_;
-    gb::CPU cpu_;
     gb::PPU ppu_;
     gb::APU apu_;
+    gb::CPU cpu_;
+
+    std::string rom_path_;
 
     std::vector<ButtonInfo> buttons_{
         {"A", 1u << 0, "Z"},
