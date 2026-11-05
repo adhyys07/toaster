@@ -124,6 +124,12 @@ public:
         cpu_.setInput(joypad);
     }
 
+    bool supportsPatches() const override { return true; }
+
+    void setPatches(const std::vector<MemoryPatch>& patches) override {
+        memory_.setPatches(patches);
+    }
+
     bool saveState(std::vector<uint8_t>& out) const override {
         if (!cartridge_.loaded()) return false;
 

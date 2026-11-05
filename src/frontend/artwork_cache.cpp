@@ -1,13 +1,28 @@
 #include "artwork_cache.h"
 #include <SDL_image.h>
 
+#include <cstdio>
 #include <filesystem>
 
 namespace emu::frontend {
 namespace fs = std::filesystem;
 
+ArtworkCache::ArtworkCache(SDL_Renderer* renderer)
+    : renderer_(renderer) {
+    constexpr int kFormats = IMG_INIT_PNG | IMG_INIT_JPG;
+    ready_ = (IMG_Init(kFormats) & kFormats) == kFormats;
+    if (!ready_) {
+        std::fprintf(stderr, "Cover art unavailable: %s\n", IMG_GetError());
+    }
+}
+
+ArtworkCache::~ArtworkCache() {
+    clear();
+    if (ready_) IMG_Quit();
+}
+
 SDL_Texture* ArtworkCache::get(const std::string& path) {
-    if (path.empty()) return nullptr;
+    if (!ready_ || path.empty()) return nullptr;
     const auto found = textures_.find(path);
     if (found != textures_.end()) return found->second;
 

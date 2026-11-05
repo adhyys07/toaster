@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../src/core/system.h"
+
 #include "apu.h"
 #include "cartridge.h"
 #include "cpu.h"
@@ -47,6 +49,10 @@ public:
 
     void setController(int port, uint8_t state) { controller_[port & 1] = state; }
 
+    void setPatches(std::vector<emu::MemoryPatch> patches) {
+        patches_ = std::move(patches);
+    }
+
     float audioSample() const { return apu.output(); }
 
     CPU cpu{*this};
@@ -57,6 +63,12 @@ public:
     uint64_t masterClock() const { return clock_counter_; }
 
 private:
+    uint8_t patch(uint16_t addr, uint8_t value) const;
+
+    // Cheats are applied to CPU reads, which is the only place a patch can
+    // reach ROM as well as RAM.
+    std::vector<emu::MemoryPatch> patches_;
+
     uint8_t ram_[2048] = {};
 
     uint8_t controller_[2]       = {};

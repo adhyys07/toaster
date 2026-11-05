@@ -106,6 +106,12 @@ public:
         bus_.setController(port, static_cast<uint8_t>(state));
     }
 
+    bool supportsPatches() const override { return true; }
+
+    void setPatches(const std::vector<MemoryPatch>& patches) override {
+        bus_.setPatches(patches);
+    }
+
     bool saveState(std::vector<uint8_t>& out) const override {
         if (!cart_.loaded()) return false;
         StateWriter visit;

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../src/core/system.h"
+
 #include "cartridge.h"
 
 #include <array>
@@ -25,10 +27,17 @@ public:
     void reset();
 
     uint8_t read(uint16_t address);
+    uint8_t readRaw(uint16_t address);
     void write(uint16_t address, uint8_t value);
 
     uint8_t joypad() const;
     void setButtons(uint8_t buttons);
+
+    // Cheats are applied on the way out of read(), so a patch reaches ROM as
+    // well as RAM.
+    void setPatches(std::vector<emu::MemoryPatch> patches) {
+        patches_ = std::move(patches);
+    }
 
     uint8_t interruptFlags() const;
     void requestInterrupt(uint8_t mask);
@@ -64,6 +73,10 @@ public:
     void clearSerialOutput() { serial_output_.clear(); }
 
 private:
+    uint8_t patch(uint16_t address, uint8_t value) const;
+
+    std::vector<emu::MemoryPatch> patches_;
+
     Cartridge* cartridge_ = nullptr;
     PPU* ppu_ = nullptr;
     APU* apu_ = nullptr;

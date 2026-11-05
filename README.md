@@ -121,13 +121,35 @@ Keyboard controls during built-in core gameplay (NES, Game Boy, CHIP-8):
 | Pause / frame advance | P / N |
 | Fast forward | Tab |
 | Volume down / up / mute | - / = / M |
-| Register view | F12 |
+| Toggle cheats | F9 |
+| Screenshot | F10 |
 | Fullscreen | F11 |
+| Register view | F12 |
 | Exit | Escape |
 
 F1 opens the pause menu for both built-in and Libretro cores, which is why
 saving is on Shift + F1-F9. While the menu is open it takes the keyboard and
 the controller, so nothing reaches the game.
+
+Screenshots are written as PNGs to a `screenshots` folder beside the
+executable.
+
+### Cheats
+
+Put a `<game>.cht` file next to the ROM. Each line is a NES Game Genie code or
+a raw patch, with an optional description after it:
+
+```text
+# Infinite lives
+SXIOPO
+0100:63     Raw patch: write 0x63 at 0x0100
+8123?A9:EA  Only patch when the byte already reads 0xA9
+-0300:01    A leading dash disables a line
+```
+
+Cheats load automatically and F9 toggles them during play. They work on the
+NES and Game Boy cores, which can intercept CPU reads; Libretro cores ignore
+them.
 
 Save states and rewind work on the NES, Game Boy, and CHIP-8 cores. States are
 written to a `states` folder beside the executable, and `rewind_seconds` in
@@ -211,22 +233,39 @@ build/emu.exe --games-dir "/path/to/games" \
   --library-server http://127.0.0.1:8765
 ```
 
+An `https://` URL works too, with certificate verification enabled, so the
+service does not have to run on the same machine.
+
 Without `--library-server`, Toaster continues using its built-in offline
-library scanner.
+library scanner. A rescan runs on a background thread, so the library window
+stays responsive while the service works.
 
 The service provides these endpoints:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /scan` | Scan a local games folder |
-| `GET /games` | List locally available games |
+| `GET /health` | Liveness and version |
+| `POST /scan` | Scan a local games folder; also prunes rows whose file is gone |
+| `GET /games` | List locally available games; takes `limit` and `offset` |
 | `GET /games?filter=favorites` | List favorite games |
-| `GET /games?filter=recent` | List recently played games |
+| `GET /games?filter=recent` | List recently played games, newest first |
+| `GET /games/{id}` | One game by id |
 | `POST /games/{id}/favorite` | Change a favorite flag |
 | `POST /games/{id}/played` | Record a launch and increment play count |
-| `PUT /games/{id}/tags` | Store user tags |
+| `PUT /games/{id}/tags` | Store user tags, normalised and deduplicated |
 | `GET /statistics` | Return library totals and system counts |
 | `GET /catalog/search?q=...` | Search metadata without downloading games |
+
+`POST /scan` accepts `{"folder": "...", "prune_missing": false}` to keep rows
+for files that are no longer present.
+
+Run the tests with:
+
+```bash
+cd services/library_server
+python -m pip install -r requirements-dev.txt
+python -m pytest .
+```
 
 The SQLite path defaults to `toaster-library.sqlite`. Set
 `TOASTER_DATABASE` to use another location:
@@ -248,7 +287,8 @@ paths returned by the library scan; the service does not download ROMs.
 
 ## Build on Windows
 
-Install CMake, Ninja, MinGW-w64, Python 3, SDL2, and SDL2_ttf. Then run:
+Install CMake, Ninja, MinGW-w64, Python 3, SDL2, SDL2_ttf, SDL2_image, and
+libcurl. Then run:
 
 ```bash
 cmake -S . -B build -G Ninja
@@ -269,7 +309,8 @@ Ubuntu/Debian:
 ```bash
 sudo apt update
 sudo apt install build-essential cmake ninja-build python3 \
-  libsdl2-dev libsdl2-ttf-dev libgl-dev
+  libsdl2-dev libsdl2-ttf-dev libsdl2-image-dev \
+  libcurl4-openssl-dev libgl-dev
 ```
 
 Build and test:

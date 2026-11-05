@@ -19,6 +19,7 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
             mingw-w64-x86_64-SDL2 mingw-w64-x86_64-SDL2_ttf
+            mingw-w64-x86_64-SDL2_image mingw-w64-x86_64-curl
             mingw-w64-x86_64-python
       - name: Configure
         shell: msys2 {0}

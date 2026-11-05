@@ -1,8 +1,15 @@
 import sqlite3
-from pathlib import Path
 import threading
+from pathlib import Path
+
 
 class GameDatabase:
+    # Every query returns the same column set, so the frontend can rely on it.
+    _COLUMNS = """
+        id, path, title, system, extension, artwork,
+        favorite, last_played, play_count, tags
+    """
+
     def __init__(self, database_path: str):
         self.database_path = Path(database_path)
         self.lock = threading.RLock()
@@ -12,6 +19,15 @@ class GameDatabase:
         )
         self.connection.row_factory = sqlite3.Row
         self.create_tables()
+
+    def close(self):
+        """Releases the database file.
+
+        Windows refuses to delete a file that is still open, so tests and
+        anything else with a short-lived database need this.
+        """
+        with self.lock:
+            self.connection.close()
 
     def create_tables(self):
         self.connection.execute("""
@@ -26,8 +42,8 @@ class GameDatabase:
                 last_played INTEGER
             )
         """)
-
         self.connection.commit()
+
         columns = {
             row["name"] for row in self.connection.execute(
                 "PRAGMA table_info(games)"
@@ -41,63 +57,112 @@ class GameDatabase:
             self.connection.execute(
                 "ALTER TABLE games ADD COLUMN tags TEXT NOT NULL DEFAULT ''"
             )
+
+        # The library window re-queries on every keystroke. Filtering in
+        # Python meant reading the whole table each time; these let SQLite do
+        # the work instead.
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS games_favorite "
+            "ON games(favorite) WHERE favorite = 1"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS games_last_played "
+            "ON games(last_played DESC)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS games_system ON games(system)"
+        )
+        self.connection.commit()
+
+        # WAL lets a read run while a scan is writing, which is what the
+        # frontend does when it rescans in the background.
+        self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.commit()
 
     def upsert_game(self, game: dict):
-        with self.lock:
-            self.connection.execute("""
-            INSERT INTO games (
-                path,
-                title,
-                system,
-                extension,
-                artwork,
-                favorite,
-                last_played
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET
-                title = excluded.title,
-                system = excluded.system,
-                extension = excluded.extension,
-                artwork = excluded.artwork
-            """, (
+        self.upsert_games([game])
+
+    def upsert_games(self, games) -> int:
+        """Inserts a whole scan in one transaction.
+
+        The previous version committed once per row, which made scanning a
+        large folder far slower than it needed to be.
+        """
+        rows = [
+            (
                 game["path"], game["title"], game["system"],
                 game["extension"], game.get("artwork"),
                 int(game.get("favorite", False)), game.get("last_played"),
-            ))
-            self.connection.commit()
+            )
+            for game in games
+        ]
+        if not rows:
+            return 0
 
-    def list_games(self):
-        cursor = self.connection.execute("""
-            SELECT
-                id,
-                path,
-                title,
-                system,
-                extension,
-                artwork,
-                favorite,
-                last_played,
-                play_count,
-                tags
-            FROM games
-            ORDER BY title COLLATE NOCASE
-        """)
+        with self.lock, self.connection:
+            self.connection.executemany("""
+                INSERT INTO games (
+                    path, title, system, extension, artwork,
+                    favorite, last_played
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    title = excluded.title,
+                    system = excluded.system,
+                    extension = excluded.extension,
+                    artwork = excluded.artwork
+            """, rows)
+        return len(rows)
 
+    def list_games(self, filter_name: str | None = None,
+                   limit: int | None = None, offset: int = 0):
+        if filter_name == "favorites":
+            sql = (f"SELECT {self._COLUMNS} FROM games WHERE favorite = 1 "
+                   "ORDER BY title COLLATE NOCASE")
+        elif filter_name == "recent":
+            sql = (f"SELECT {self._COLUMNS} FROM games "
+                   "WHERE last_played IS NOT NULL "
+                   "ORDER BY last_played DESC")
+        else:
+            sql = (f"SELECT {self._COLUMNS} FROM games "
+                   "ORDER BY title COLLATE NOCASE")
+
+        parameters: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            parameters = (int(limit), int(offset))
+
+        cursor = self.connection.execute(sql, parameters)
         return [dict(row) for row in cursor.fetchall()]
 
-    def set_favorite(self, game_id: int, favorite: bool):
-        with self.lock:
+    def remove_missing(self, folder: str) -> int:
+        """Drops rows whose file has disappeared from the scanned folder."""
+        root = str(Path(folder).resolve())
+        stale = [
+            row["id"] for row in self.connection.execute(
+                f"SELECT id, path FROM games WHERE path LIKE ?", (root + "%",)
+            )
+            if not Path(row["path"]).exists()
+        ]
+        if not stale:
+            return 0
+
+        with self.lock, self.connection:
+            self.connection.executemany(
+                "DELETE FROM games WHERE id = ?", [(i,) for i in stale]
+            )
+        return len(stale)
+
+    def set_favorite(self, game_id: int, favorite: bool) -> bool:
+        with self.lock, self.connection:
             cursor = self.connection.execute(
                 "UPDATE games SET favorite = ? WHERE id = ?",
                 (int(favorite), game_id),
             )
-            self.connection.commit()
-            return cursor.rowcount == 1
+        return cursor.rowcount == 1
 
-    def mark_played(self, game_id: int, timestamp: int):
-        with self.lock:
+    def mark_played(self, game_id: int, timestamp: int) -> bool:
+        with self.lock, self.connection:
             cursor = self.connection.execute(
                 """
                 UPDATE games
@@ -106,20 +171,18 @@ class GameDatabase:
                 """,
                 (timestamp, game_id),
             )
-            self.connection.commit()
-            return cursor.rowcount == 1
+        return cursor.rowcount == 1
 
-    def set_tags(self, game_id: int, tags: list[str]):
+    def set_tags(self, game_id: int, tags: list[str]) -> bool:
         normalized = sorted({
             tag.strip().lower() for tag in tags if tag.strip()
         })
-        with self.lock:
+        with self.lock, self.connection:
             cursor = self.connection.execute(
                 "UPDATE games SET tags = ? WHERE id = ?",
                 (",".join(normalized), game_id),
             )
-            self.connection.commit()
-            return cursor.rowcount == 1
+        return cursor.rowcount == 1
 
     def statistics(self):
         systems = self.connection.execute("""
@@ -147,7 +210,9 @@ class GameDatabase:
         }
 
     def get_game(self, game_id: int):
+        # An indexed lookup on the primary key, rather than the full table
+        # scan the endpoint used to do.
         row = self.connection.execute(
-            "SELECT * FROM games WHERE id = ?", (game_id,)
+            f"SELECT {self._COLUMNS} FROM games WHERE id = ?", (game_id,)
         ).fetchone()
         return dict(row) if row else None

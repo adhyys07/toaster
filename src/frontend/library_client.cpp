@@ -1,130 +1,90 @@
 #include "library_client.h"
 
+#include <curl/curl.h>
+
 #include <cctype>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <utility>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <netdb.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 namespace emu::frontend {
 namespace {
 
-class SocketRuntime {
-public:
-    SocketRuntime() {
-#ifdef _WIN32
-        WSADATA data{};
-        WSAStartup(MAKEWORD(2, 2), &data);
-#endif
-    }
-    ~SocketRuntime() {
-#ifdef _WIN32
-        WSACleanup();
-#endif
-    }
-};
-
-void closeSocket(int socket_fd) {
-#ifdef _WIN32
-    closesocket(socket_fd);
-#else
-    close(socket_fd);
-#endif
+// libcurl wants one global init per process. The library client is used from
+// the UI thread and from the background scan worker, so this is guarded.
+void ensureCurlReady() {
+    static std::once_flag once;
+    std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
 
+size_t appendBody(void* chunk, size_t size, size_t count, void* user) {
+    const size_t bytes = size * count;
+    static_cast<std::string*>(user)->append(static_cast<char*>(chunk), bytes);
+    return bytes;
+}
+
+// Performs one request. Replaces a hand-rolled socket client that could only
+// speak plain HTTP, so the service can now be reached over TLS.
 bool request(const std::string& base_url, const std::string& method,
              const std::string& path, const std::string& body,
              std::string& response, std::string& error) {
-    constexpr char prefix[] = "http://";
-    if (base_url.compare(0, sizeof(prefix) - 1, prefix) != 0) {
-        error = "Library server URL must start with http://";
+    if (base_url.rfind("http://", 0) != 0 &&
+        base_url.rfind("https://", 0) != 0) {
+        error = "Library server URL must start with http:// or https://";
         return false;
     }
-    const std::string address = base_url.substr(sizeof(prefix) - 1);
-    const auto slash = address.find('/');
-    const std::string host_port = address.substr(0, slash);
-    const auto colon = host_port.rfind(':');
-    const std::string host = host_port.substr(0, colon);
-    const std::string port = colon == std::string::npos
-        ? "80" : host_port.substr(colon + 1);
-    SocketRuntime runtime;
-    addrinfo hints{};
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_family = AF_UNSPEC;
-    addrinfo* addresses = nullptr;
-    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &addresses) != 0) {
-        error = "Could not resolve library server";
+
+    ensureCurlReady();
+    CURL* handle = curl_easy_init();
+    if (!handle) {
+        error = "Could not initialise the HTTP client";
         return false;
     }
-    int socket_fd = -1;
-    for (addrinfo* item = addresses; item; item = item->ai_next) {
-        socket_fd = static_cast<int>(socket(item->ai_family, item->ai_socktype,
-                                            item->ai_protocol));
-        if (socket_fd >= 0 &&
-            connect(socket_fd, item->ai_addr,
-                    static_cast<int>(item->ai_addrlen)) == 0) break;
-        if (socket_fd >= 0) closeSocket(socket_fd);
-        socket_fd = -1;
+
+    std::string url = base_url;
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    url += path;
+
+    curl_slist* headers =
+        curl_slist_append(nullptr, "Content-Type: application/json");
+
+    response.clear();
+    curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, appendBody);
+    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &response);
+    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 5L);
+    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(handle, CURLOPT_USERAGENT, "Toaster/0.2");
+    // Certificate verification stays on: it is the whole point of https.
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(handle, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    if (!body.empty()) {
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE,
+                         static_cast<long>(body.size()));
     }
-    freeaddrinfo(addresses);
-    if (socket_fd < 0) {
-        error = "Could not connect to library server";
+
+    const CURLcode result = curl_easy_perform(handle);
+    long status = 0;
+    curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
+
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(handle);
+
+    if (result != CURLE_OK) {
+        error = curl_easy_strerror(result);
         return false;
     }
-#ifdef _WIN32
-    DWORD timeout_ms = 5000;
-    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO,
-               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO,
-               reinterpret_cast<const char*>(&timeout_ms), sizeof(timeout_ms));
-#else
-    timeval timeout{};
-    timeout.tv_sec = 5;
-    setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-#endif
-    const std::string target = slash == std::string::npos
-        ? path : address.substr(slash) + path;
-    const std::string message = method + " " + target + " HTTP/1.1\r\nHost: " +
-        host + "\r\nConnection: close\r\nContent-Type: application/json\r\n" +
-        "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
-    size_t sent = 0;
-    while (sent < message.size()) {
-        const int count = send(socket_fd, message.data() + sent,
-                               static_cast<int>(message.size() - sent), 0);
-        if (count <= 0) {
-            closeSocket(socket_fd);
-            error = "Could not send library request";
-            return false;
-        }
-        sent += static_cast<size_t>(count);
-    }
-    char buffer[4096];
-    int count = 0;
-    while ((count = recv(socket_fd, buffer, sizeof(buffer), 0)) > 0)
-        response.append(buffer, static_cast<size_t>(count));
-    if (count < 0) {
-        closeSocket(socket_fd);
-        error = "Library server response timed out";
+    if (status < 200 || status >= 300) {
+        error = "Library server returned HTTP " + std::to_string(status);
         return false;
     }
-    closeSocket(socket_fd);
-    const auto header_end = response.find("\r\n\r\n");
-    const auto status_end = response.find(' ');
-    if (header_end == std::string::npos || status_end == std::string::npos ||
-        response.compare(status_end + 1, 3, "200") != 0) {
-        error = "Library server returned an error";
-        return false;
-    }
-    response.erase(0, header_end + 4);
     return true;
 }
 

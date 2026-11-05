@@ -20,9 +20,26 @@ struct ButtonInfo {
     const char* default_key; 
 };
  
+// A cheat, reduced to what a core needs to honour it. `compare` is only
+// consulted when has_compare is set, which is how a Game Genie code patches
+// one bank rather than whatever happens to be mapped at the address.
+struct MemoryPatch {
+    uint16_t address = 0;
+    uint8_t  value = 0;
+    bool     has_compare = false;
+    uint8_t  compare = 0;
+};
+
 class System {
 public:
     virtual ~System() = default;
+
+    // Cores that can intercept CPU reads override this; the rest ignore
+    // cheats rather than failing.
+    virtual void setPatches(const std::vector<MemoryPatch>& patches) {
+        (void)patches;
+    }
+    virtual bool supportsPatches() const { return false; }
  
     virtual const char* name() const = 0;
  

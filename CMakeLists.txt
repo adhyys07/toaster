@@ -65,10 +65,26 @@ target_link_libraries(binding_tests PRIVATE emu_core)
 add_test(NAME bindings COMMAND binding_tests)
 set_tests_properties(bindings PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+add_executable(cheat_tests
+    tests/test_cheats.cpp
+    src/frontend/cheat_list.cpp)
+target_include_directories(cheat_tests PRIVATE src/frontend)
+add_test(NAME cheats COMMAND cheat_tests)
+set_tests_properties(cheats PROPERTIES
+                     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 add_executable(gb_tests systems/gb/test_gb.cpp)
 target_link_libraries(gb_tests PRIVATE emu_core)
 add_test(NAME gameboy COMMAND gb_tests)
 set_tests_properties(gameboy PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
+# The library UI scans on a worker thread, so threading is needed on every
+# platform rather than only on Unix.
+find_package(Threads REQUIRED)
+
+# The library client speaks HTTPS, which means a real TLS stack rather than the
+# raw sockets it used before.
+find_package(CURL REQUIRED)
 
 find_package(SDL2 REQUIRED)
 add_executable(settings_tests
@@ -87,9 +103,14 @@ add_executable(emu
     src/frontend/main.cpp
     src/frontend/settings.cpp
     src/frontend/gl_fsr_upscaler.cpp
+    src/frontend/gl_crt_shader.cpp
+    src/frontend/ui_font.cpp
     src/frontend/bios_manager.cpp
     src/frontend/core/core_manager.cpp
     src/frontend/game_metadata.cpp
+    src/frontend/artwork_cache.cpp
+    src/frontend/cheat_list.cpp
+    src/frontend/screenshot.cpp
     src/frontend/save_state_manager.cpp
     src/frontend/crash_logger.cpp
     src/frontend/library_client.cpp
@@ -100,7 +121,14 @@ add_executable(emu
     systems/ps1/ps1_system.cpp
     src/frontend/pause_menu.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
-target_link_libraries(emu PRIVATE emu_core)
+target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
+
+if(MINGW)
+    # Without this the executable needs libstdc++-6.dll and libgcc_s_seh-1.dll
+    # from the build machine's toolchain, which the release archive does not
+    # contain, so it fails to start elsewhere with STATUS_DLL_NOT_FOUND.
+    target_link_options(emu PRIVATE -static-libgcc -static-libstdc++)
+endif()
 
 add_custom_command(TARGET emu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -146,17 +174,33 @@ else()
     find_package(OpenGL REQUIRED)
     target_link_libraries(emu PRIVATE OpenGL::GL ${CMAKE_DL_LIBS})
     if(UNIX)
-        find_package(Threads REQUIRED)
         target_link_libraries(emu PRIVATE Threads::Threads)
     endif()
 endif()
 
 find_package(SDL2_image REQUIRED)
+# The imported target is preferred, but MSYS2's sdl2_image-config.cmake builds
+# its import library name as "SDL2_image.dll.lib", which does not exist in a
+# MinGW prefix. When that happens the library is located by hand instead, the
+# same way the SDL2_ttf block below does.
+set(SDL2_IMAGE_TARGET_USABLE FALSE)
 if(TARGET SDL2_image::SDL2_image)
+    get_target_property(SDL2_IMAGE_IMPLIB SDL2_image::SDL2_image IMPORTED_IMPLIB)
+    if(NOT SDL2_IMAGE_IMPLIB OR EXISTS "${SDL2_IMAGE_IMPLIB}")
+        set(SDL2_IMAGE_TARGET_USABLE TRUE)
+    endif()
+endif()
+
+if(SDL2_IMAGE_TARGET_USABLE)
     target_link_libraries(emu PRIVATE SDL2_image::SDL2_image)
 else()
     find_path(SDL2_IMAGE_INCLUDE_DIR SDL_image.h PATH_SUFFIXES SDL2)
-    find_library(SDL2_IMAGE_LINK_LIBRARY NAMES SDL2_image)
+    find_library(SDL2_IMAGE_LINK_LIBRARY
+                 NAMES SDL2_image libSDL2_image.dll.a SDL2_image.dll)
+    if(NOT SDL2_IMAGE_INCLUDE_DIR OR NOT SDL2_IMAGE_LINK_LIBRARY)
+        message(FATAL_ERROR
+                "SDL2_image was found, but its headers or library are missing")
+    endif()
     target_include_directories(emu PRIVATE "${SDL2_IMAGE_INCLUDE_DIR}")
     target_link_libraries(emu PRIVATE "${SDL2_IMAGE_LINK_LIBRARY}")
 endif()

@@ -25,13 +25,22 @@ void Bus::reset() {
     std::memset(ram_, 0, sizeof(ram_));
 }
 
+uint8_t Bus::patch(uint16_t addr, uint8_t value) const {
+    for (const emu::MemoryPatch& item : patches_) {
+        if (item.address != addr) continue;
+        if (item.has_compare && item.compare != value) continue;
+        return item.value;
+    }
+    return value;
+}
+
 uint8_t Bus::cpuRead(uint16_t addr, bool readonly) {
     uint8_t data = 0;
 
-    if (cart && cart->cpuRead(addr, data)) return data;
+    if (cart && cart->cpuRead(addr, data)) return patch(addr, data);
 
     if (addr <= 0x1FFF) {
-        return ram_[addr & 0x07FF];
+        return patch(addr, ram_[addr & 0x07FF]);
     }
     if (addr <= 0x3FFF) {
         return ppu.cpuRead(addr & 0x0007, readonly);

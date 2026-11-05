@@ -2,6 +2,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <chrono>
+#include <future>
 #include <map>
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -30,6 +32,9 @@
 #include "crash_logger.h"
 #include "core/core_manager.h"
 #include "game_library.h"
+#include "artwork_cache.h"
+#include "cheat_list.h"
+#include "screenshot.h"
 #include "bios_manager.h"
 #include "sha256.h"
 #include "save_state_manager.h"
@@ -171,6 +176,10 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
             GameEntry game = readGameEntry(item.path());
             game.favorite =
                 favorites.count(gamePathKey(game.path)) != 0;
+            if (game.artwork.empty()) {
+                game.artwork =
+                    emu::frontend::findArtwork(item.path().string());
+            }
             games.push_back(std::move(game));
         }
     }
@@ -571,20 +580,51 @@ std::string showGameMenu(const fs::path& folder,
         }
     }
 
-    // Rescan: ask the service to re-read the folder, or fall back to the
-    // built-in scanner when there is no service.
+    // A rescan talks to the service over the network, which can take seconds.
+    // Running it on the UI thread froze the window, so it runs on a worker and
+    // the result is adopted on a later frame.
+    //
+    // GameLibrary is not thread safe, so while a scan is in flight the UI must
+    // not read from it: `scanning` suppresses the statistics line and the
+    // actions that look a game up by path.
+    std::future<bool> scan_future;
+    std::string scan_error;
+    bool scanning = false;
+
     const auto rescanGames = [&] {
-        if (library) {
-            std::string library_error;
-            if (!library->scanFolder(folder.string(), library_error)) {
-                std::fprintf(stderr, "Could not rescan library: %s\n",
-                             library_error.c_str());
-                return;
-            }
+        if (!library) {
+            games = scanGames(folder);
+            return;
+        }
+        if (scanning) return;   // one at a time
+
+        scanning = true;
+        scan_error.clear();
+        emu::frontend::GameLibrary* worker = library.get();
+        const std::string path = folder.string();
+        scan_future = std::async(std::launch::async,
+                                 [worker, path, &scan_error] {
+            return worker->scanFolder(path, scan_error);
+        });
+    };
+
+    // Picks up a finished scan. Called once per frame from the UI loop.
+    const auto collectScan = [&] {
+        if (!scanning || !scan_future.valid()) return false;
+        if (scan_future.wait_for(std::chrono::seconds(0)) !=
+            std::future_status::ready) {
+            return false;
+        }
+
+        const bool ok = scan_future.get();
+        scanning = false;
+        if (ok) {
             adoptLibraryGames();
         } else {
-            games = scanGames(folder);
+            std::fprintf(stderr, "Could not rescan library: %s\n",
+                         scan_error.c_str());
         }
+        return true;
     };
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
@@ -618,6 +658,10 @@ std::string showGameMenu(const fs::path& folder,
         return {};
     }
 
+    // Cover art is optional: the cache reports whether image support came up,
+    // and the detail pane falls back to a placeholder when it did not.
+    emu::frontend::ArtworkCache artwork(menu_renderer);
+
     size_t selected = 0;
     size_t first_visible = 0;
     constexpr int row_height = 34;
@@ -637,6 +681,8 @@ std::string showGameMenu(const fs::path& folder,
     bool search_active = false;
     const auto markPlayed = [&](const GameEntry& game) {
         if (!library) return;
+        // A scan in flight owns the library's cached rows.
+        if (scanning) return;
         const emu::frontend::RemoteGame* remote = library->find(game.path);
         if (!remote) return;
         std::string library_error;
@@ -646,6 +692,10 @@ std::string showGameMenu(const fs::path& folder,
         }
     };
     while (running) {
+        // A finished background scan replaces the list, so the frame after it
+        // lands has to redraw.
+        if (collectScan()) redraw = true;
+
         if (redraw) {
             const std::vector<GameEntry> visible_games =
                 filterGames(games, search);
@@ -708,7 +758,12 @@ std::string showGameMenu(const fs::path& folder,
             const std::string count = std::to_string(visible_games.size()) +
                 (visible_games.size() == 1 ? " game" : " games");
             drawMenuText(menu_renderer, font, count, 340, 103, muted);
-            if (library) {
+            if (scanning) {
+                // The worker owns the library's state until it finishes, so
+                // the totals cannot be read here.
+                drawMenuText(menu_renderer, font, "Scanning the library...",
+                             36, 560, gold);
+            } else if (library) {
                 drawMenuText(menu_renderer, font,
                              "Total " +
                                  std::to_string(library->statistics().total) +
@@ -760,37 +815,68 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 const GameEntry& game = visible_games[selected];
+
+                // Cover art sits at the left of the detail pane with the
+                // metadata beside it, so the description below keeps the full
+                // width of the pane.
+                const SDL_Rect art_box{500, 148, 150, 200};
+                constexpr int kDetailX = 666;
+                constexpr int kDetailWrap = 284;
+
+                if (SDL_Texture* art = artwork.get(game.artwork)) {
+                    int art_w = 0;
+                    int art_h = 0;
+                    SDL_QueryTexture(art, nullptr, nullptr, &art_w, &art_h);
+                    // Letterbox rather than stretch: covers are not all the
+                    // same aspect ratio.
+                    const double scale = std::min(
+                        static_cast<double>(art_box.w) / art_w,
+                        static_cast<double>(art_box.h) / art_h);
+                    SDL_Rect fit{0, 0,
+                                 static_cast<int>(art_w * scale),
+                                 static_cast<int>(art_h * scale)};
+                    fit.x = art_box.x + (art_box.w - fit.w) / 2;
+                    fit.y = art_box.y + (art_box.h - fit.h) / 2;
+                    SDL_RenderCopy(menu_renderer, art, nullptr, &fit);
+                } else {
+                    SDL_SetRenderDrawColor(menu_renderer, 28, 32, 40, 255);
+                    SDL_RenderFillRect(menu_renderer, &art_box);
+                    SDL_SetRenderDrawColor(menu_renderer,
+                                           panel_border.r, panel_border.g,
+                                           panel_border.b, panel_border.a);
+                    SDL_RenderDrawRect(menu_renderer, &art_box);
+                    drawMenuText(menu_renderer, font, "No cover",
+                                 art_box.x + 38, art_box.y + 90, muted);
+                }
+
                 TTF_SetFontStyle(font, TTF_STYLE_BOLD);
-                drawMenuText(menu_renderer, font, game.title, 500, 148, gold, 450);
+                drawMenuText(menu_renderer, font, game.title,
+                             kDetailX, 148, gold, kDetailWrap);
                 TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
                 drawMenuText(menu_renderer, font,
                              "Developer  " + game.developer,
-                             500, 204, white, 450);
+                             kDetailX, 204, white, kDetailWrap);
                 drawMenuText(menu_renderer, font, "Year       " + game.year,
-                             500, 240, white);
+                             kDetailX, 240, white);
                 drawMenuText(menu_renderer, font, "Genre      " + game.genre,
-                             500, 276, white, 450);
-                drawMenuText(menu_renderer, font,
-                             "Artwork    " +
-                                 (game.artwork.empty() ? "None" : game.artwork),
-                             500, 300, muted, 450);
+                             kDetailX, 276, white, kDetailWrap);
                 drawMenuText(menu_renderer, font,
                              "Tags       " +
                                  (game.tags.empty() ? "None" : game.tags),
-                             500, 330, muted, 450);
+                             kDetailX, 312, muted, kDetailWrap);
 
-                SDL_Rect separator{500, 316, 450, 1};
+                SDL_Rect separator{500, 360, 450, 1};
                 SDL_SetRenderDrawColor(menu_renderer,
                                        panel_border.r, panel_border.g,
                                        panel_border.b, panel_border.a);
                 SDL_RenderFillRect(menu_renderer, &separator);
                 drawMenuText(menu_renderer, font, "DESCRIPTION",
-                             500, 336, muted);
+                             500, 372, muted);
                 drawMenuText(menu_renderer, font, game.description,
-                             500, 370, white, 445);
+                             500, 400, white, 445);
                 drawMenuText(menu_renderer, font,
                              game.favorite ? "Favorite" : "Not a favorite",
-                             500, 470, game.favorite ? gold : muted);
+                             500, 500, game.favorite ? gold : muted);
             }
 
             drawMenuButton(menu_renderer, font, launch_button, "Launch",
@@ -802,25 +888,6 @@ std::string showGameMenu(const fs::path& folder,
             drawMenuText(menu_renderer, font,
                          "F toggles favorite. / searches. Double-click or Enter launches.",
                          28, 602, muted, 820);
-
-            const SDL_Rect art_box{detail_x + 16, detail_y + 16, 220, 300};
-            if (SDL_Texture* art = cache.get(game.artwork)) {
-                int art_w = 0, art_h = 0;
-                SDL_QueryTexture(art, nullptr, nullptr, &art_w, &art_h);
-                const double scale = std::min(
-                    static_cast<double>(art_box.w) / art_w,
-                    static_cast<double>(art_box.h) / art_h);
-                SDL_Rect fit{0, 0, static_cast<int>(art_w * scale),
-                                   static_cast<int>(art_h * scale)};
-                fit.x = art_box.x + (art_box.w - fit.w) / 2;
-                fit.y = art_box.y + (art_box.h - fit.h) / 2;
-                SDL_RenderCopy(menu_renderer, art, nullptr, &fit);
-            } else {
-                SDL_SetRenderDrawColor(menu_renderer, 28, 32, 40, 255);
-                SDL_RenderFillRect(menu_renderer, &art_box);
-                drawMenuText(menu_renderer, font, "No artwork",
-                             art_box.x + 60, art_box.y + 140, grey);
-            }
 
             redraw = false;
         }
@@ -882,7 +949,13 @@ std::string showGameMenu(const fs::path& folder,
                             }
                         }
                         std::string library_error;
-                        if (library) {
+                        if (library && scanning) {
+                            // Deferring is better than racing the worker; the
+                            // local flag above still shows the new state.
+                            std::fprintf(stderr,
+                                         "Library is scanning; favorite not "
+                                         "sent to the service\n");
+                        } else if (library) {
                             const emu::frontend::RemoteGame* remote =
                                 library->find(chosen);
                             if (!remote) {
@@ -1040,6 +1113,8 @@ std::string showGameMenu(const fs::path& folder,
         } while (SDL_PollEvent(&event));
     }
 
+    // The textures belong to the renderer, so they are released first.
+    artwork.clear();
     SDL_DestroyRenderer(menu_renderer);
     SDL_DestroyWindow(menu_window);
     TTF_CloseFont(font);
@@ -1221,6 +1296,35 @@ int runGenericGame(const std::string& rom_path,
 
     const std::string base_title = std::string(system->name()) + " - " + rom_path;
     std::string title = base_title;
+
+    // Cheats come from "<game>.cht" beside the ROM. They stay loaded so the
+    // F9 toggle can turn them on and off without re-reading the file.
+    const std::vector<emu::frontend::Cheat> cheats =
+        system->supportsPatches() ? emu::frontend::loadCheatFile(rom_path)
+                                  : std::vector<emu::frontend::Cheat>{};
+    bool cheats_enabled = !cheats.empty();
+    const auto pushCheats = [&] {
+        std::vector<emu::MemoryPatch> patches;
+        if (cheats_enabled) {
+            for (const emu::frontend::Cheat& cheat : cheats) {
+                if (!cheat.enabled) continue;
+                emu::MemoryPatch patch;
+                patch.address = cheat.address;
+                patch.value = cheat.value;
+                patch.has_compare = cheat.compare.has_value();
+                patch.compare = cheat.compare.value_or(0);
+                patches.push_back(patch);
+            }
+        }
+        system->setPatches(patches);
+    };
+    if (!cheats.empty()) {
+        pushCheats();
+        std::printf("Loaded %zu cheat%s from %s\n", cheats.size(),
+                    cheats.size() == 1 ? "" : "s",
+                    fs::path(rom_path).replace_extension(".cht")
+                        .filename().string().c_str());
+    }
 
     emu::frontend::RewindBuffer rewind_buffer(
         settings.rewind_seconds * 30, 2);
@@ -1548,6 +1652,21 @@ int runGenericGame(const std::string& rom_path,
                     frame_advance = true;
                 } else if (key == SDLK_TAB) {
                     fast_forward = !fast_forward;
+                } else if (key == SDLK_F9 && !cheats.empty()) {
+                    cheats_enabled = !cheats_enabled;
+                    pushCheats();
+                    std::printf("Cheats %s\n",
+                                cheats_enabled ? "enabled" : "disabled");
+                } else if (key == SDLK_F10) {
+                    std::string shot_error;
+                    const std::string path = emu::frontend::saveScreenshot(
+                        system->video(), rom_path, shot_error);
+                    if (path.empty()) {
+                        std::fprintf(stderr, "Screenshot failed: %s\n",
+                                     shot_error.c_str());
+                    } else {
+                        std::printf("Saved %s\n", path.c_str());
+                    }
                 } else if (key == SDLK_F12) {
                     showDebugInfo(*system);
                 } else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
@@ -2157,7 +2276,7 @@ int main(int argc, char** argv) {
     std::string ps1_game_path;
     std::string system_directory = "system";
     std::string core_server_url =
-        "https://example.com/toaster/cores";
+        "https://8lqb5wp0ujkilwsgmjumf7yi.a.shipwrights.dev/cores/";
     std::string library_server_url;
     fs::path games_folder = "games";
     bool mute = settings.mute;

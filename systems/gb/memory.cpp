@@ -81,7 +81,27 @@ void Memory::setInterruptEnable(uint8_t value) {
     interrupt_enable_ = value;
 }
 
+uint8_t Memory::patch(uint16_t address, uint8_t value) const {
+    for (const emu::MemoryPatch& item : patches_) {
+        if (item.address != address) continue;
+        if (item.has_compare && item.compare != value) continue;
+        return item.value;
+    }
+    return value;
+}
+
 uint8_t Memory::read(uint16_t address) {
+    if (!patches_.empty()) {
+        // Only the cartridge and work RAM are worth patching; the register
+        // file is hardware state rather than game data.
+        if (address < 0x8000 || (address >= 0xA000 && address < 0xE000)) {
+            return patch(address, readRaw(address));
+        }
+    }
+    return readRaw(address);
+}
+
+uint8_t Memory::readRaw(uint16_t address) {
     if (address < 0x8000) {
         return cartridge_ ? cartridge_->read(address) : 0xFF;
     }
