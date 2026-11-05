@@ -12,35 +12,6 @@ Toaster is a small retro-game frontend for:
 NES, CHIP-8 and Game Boy run on built-in cores. PS1, PSP, and PS2 support uses
 external Libretro cores.
 
-### Built-in core coverage
-
-| Core | Supported |
-|---|---|
-| NES | Mappers 0, 1, 2, 3, 4 and 7; sprites; 4 of 5 APU channels (no DMC). MMC3 IRQ timing is per-scanline rather than per PPU A12 edge. |
-| Game Boy | The full instruction set; background, window and sprites with 10-per-line and DMG priority; all four sound channels; MBC1, MBC2, MBC3 (with clock) and MBC5; battery saves to `.srm`. |
-| CHIP-8 | Complete. |
-
-The Game Boy video unit draws a whole scanline when the controller enters
-mode 3, so mid-line scroll and palette tricks used by a few games for raster
-effects are not reproduced. Game Boy Color is not supported.
-
-## Quick start
-
-Put cores beside the executable:
-
-```text
-Toaster/
-├── emu.exe
-├── cores/
-│   ├── swanstation_libretro.dll
-│   ├── ppsspp_libretro.dll
-│   └── pcsx2_libretro.dll
-└── system/
-```
-
-Toaster automatically searches the `cores` folder. You can also specify a core
-manually with `--ps1-core`, `--ppsspp-core`, or `--ps2-core`.
-
 ## Run games
 
 ### PS1
@@ -284,6 +255,9 @@ $env:THEGAMESDB_API_KEY = "your-key"
 
 Catalog results are metadata only. Toaster launches games only from local
 paths returned by the library scan; the service does not download ROMs.
+
+## Why I built this project
+I built this project because I feel frustrating to install multiple emulators to run another my favorite game because I cannot play all games in one emulator, to tackle this I built toaster which compiler 5 emulators inside one window.
 
 ## Build on Windows
 
