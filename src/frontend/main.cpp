@@ -34,6 +34,7 @@
 #include "game_library.h"
 #include "artwork_cache.h"
 #include "cheat_list.h"
+#include "core_manifest.h"
 #include "screenshot.h"
 #include "bios_manager.h"
 #include "sha256.h"
@@ -57,6 +58,9 @@ void printUsage(const char* exe) {
         "  --ps2 PATH          launch a PS2 image directly\n"
         "  --ps2-core PATH     path to the LRPS2 Libretro core\n"
         "  --core-server URL   HTTPS base URL for core downloads\n"
+        "  --core-server-unverified\n"
+        "                      install cores even when the server has no\n"
+        "                      manifest.txt to check them against\n"
         "  --library-server URL local Python library service URL\n"
         "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
@@ -540,12 +544,13 @@ bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
 std::string chooseRomFile();
 bool importBios(emu::frontend::BiosSystem target,
                 const std::string& system_directory);
-bool installCoreFiles(const std::string& server_url);
+bool installCoreFiles(const std::string& server_url, bool verify);
 
 std::string showGameMenu(const fs::path& folder,
                          emu::frontend::Settings& settings,
                          const std::string& system_directory,
                          const std::string& core_server_url,
+                         bool core_server_verify,
                          const std::string& library_server_url) {
     auto games = scanGames(folder);
     std::unique_ptr<emu::frontend::GameLibrary> library;
@@ -1052,7 +1057,7 @@ std::string showGameMenu(const fs::path& folder,
                 }
 
                 if (pointInside(cores_button, event.button.x, event.button.y)) {
-                    installCoreFiles(core_server_url);
+                    installCoreFiles(core_server_url, core_server_verify);
                     redraw = true;
                     break;
                 }
@@ -2060,9 +2065,8 @@ bool importBios(emu::frontend::BiosSystem target,
 }
 
 #ifdef _WIN32
-// Downloads url into destination. Returns true only when a regular file
-// landed on disk; any partial download is removed on failure.
-bool downloadTo(const std::string& url, const fs::path& destination) {
+bool downloadTo(const std::string& url, const fs::path& destination,
+                std::string& error) {
     using UrlDownloadToFileFn = HRESULT (*)(
         void*, const char*, const char*, unsigned long, void*);
     HMODULE urlmon = LoadLibraryA("urlmon.dll");
@@ -2071,23 +2075,58 @@ bool downloadTo(const std::string& url, const fs::path& destination) {
             reinterpret_cast<void*>(
                 GetProcAddress(urlmon, "URLDownloadToFileA")))
         : nullptr;
-    const HRESULT result = download
-        ? download(nullptr, url.c_str(), destination.string().c_str(), 0,
-                   nullptr)
-        : E_FAIL;
-    if (urlmon) FreeLibrary(urlmon);
 
-    std::error_code error;
-    if (FAILED(result) || !fs::is_regular_file(destination, error) || error) {
-        std::error_code cleanup_error;
-        fs::remove(destination, cleanup_error);
+    if (!download) {
+        if (urlmon) FreeLibrary(urlmon);
+        error = "Could not load urlmon.dll to perform the download.";
         return false;
     }
-    return true;
+
+    const HRESULT result =
+        download(nullptr, url.c_str(), destination.string().c_str(), 0, nullptr);
+    FreeLibrary(urlmon);
+
+    std::error_code filesystem_error;
+    if (SUCCEEDED(result) &&
+        fs::is_regular_file(destination, filesystem_error) &&
+        !filesystem_error) {
+        return true;
+    }
+
+    std::error_code cleanup;
+    fs::remove(destination, cleanup);
+
+    switch (static_cast<unsigned long>(result)) {
+    case 0x800C0005ul:  // INET_E_RESOURCE_NOT_FOUND
+        error = "The server returned 404 (file not found).";
+        break;
+    case 0x800C0002ul:  // INET_E_INVALID_URL
+        error = "The URL is not valid.";
+        break;
+    case 0x800C000Dul:  // INET_E_UNKNOWN_PROTOCOL
+        error = "The URL uses a protocol Windows cannot fetch.";
+        break;
+    case 0x800C0019ul:  // INET_E_SECURITY_PROBLEM
+        error = "The server's certificate was rejected.";
+        break;
+    case 0x800C0008ul:  // INET_E_DOWNLOAD_FAILURE
+        error = "The download failed or the connection was lost.";
+        break;
+    default: {
+        char text[64];
+        std::snprintf(text, sizeof(text),
+                      "The download failed (HRESULT 0x%08lX).",
+                      static_cast<unsigned long>(result));
+        error = text;
+        break;
+    }
+    }
+    return false;
 }
 #endif
 
-bool installCoreFiles(const std::string& server_url) {
+
+bool installCoreFiles(const std::string& server_url, bool verify) {
 #ifdef _WIN32
     char* raw_base = SDL_GetBasePath();
     const fs::path base = raw_base ? fs::path(raw_base) : fs::current_path();
@@ -2122,37 +2161,75 @@ bool installCoreFiles(const std::string& server_url) {
 
     // Fetch and parse the manifest before touching any core file.
     const fs::path manifest_temp = core_directory / "manifest.txt.download";
-    if (!downloadTo(base_url + "/manifest.txt", manifest_temp)) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
-            "The core server has no manifest.txt. Refusing to install "
-            "unverified cores.", nullptr);
-        return false;
-    }
-    std::map<std::string, std::string> expected;  // filename -> sha256
-    {
-        std::ifstream manifest(manifest_temp);
-        std::string digest, filename;
-        while (manifest >> digest >> filename) {
-            for (char& c : digest)
-                c = static_cast<char>(std::tolower(
-                    static_cast<unsigned char>(c)));
-            // Reject path traversal: manifests name bare files only.
-            if (filename.find('/') != std::string::npos ||
-                filename.find('\\') != std::string::npos ||
-                filename.find("..") != std::string::npos) {
-                continue;
-            }
-            expected[filename] = digest;
+    const std::string manifest_url = base_url + "/manifest.txt";
+    bool verified = true;
+
+    std::string download_error;
+    if (!downloadTo(manifest_url, manifest_temp, download_error)) {
+        if (verify) {
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
+                ("Could not fetch the core manifest.\n\n" + manifest_url +
+                 "\n" + download_error +
+                 "\n\nCores are loaded as native code, so Toaster will not "
+                 "install any it cannot verify. The manifest lists one line "
+                 "per file:\n\n    <sha256>  <filename>\n\nGenerate it on the "
+                 "server with:\n    sha256sum -t *.dll > manifest.txt")
+                    .c_str(),
+                nullptr);
+            return false;
         }
+
+        // --core-server-unverified was passed. Skipping the check means
+        // trusting the server and the network to hand over native code that
+        // this process will load, so it is confirmed rather than assumed.
+        const SDL_MessageBoxButtonData buttons[] = {
+            {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Cancel"},
+            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Install anyway"},
+        };
+        const std::string message =
+            "No manifest is available, so the downloaded cores cannot be "
+            "verified.\n\n" + manifest_url + "\n" + download_error +
+            "\n\nCores are loaded as native code, so a tampered download "
+            "would run with your account's privileges.\n\nInstall anyway?";
+        const SDL_MessageBoxData box{
+            SDL_MESSAGEBOX_WARNING, nullptr, "Core installation",
+            message.c_str(), SDL_arraysize(buttons), buttons, nullptr};
+
+        int pressed = 0;
+        if (SDL_ShowMessageBox(&box, &pressed) != 0 || pressed != 1) {
+            return false;
+        }
+        verified = false;
+    }
+
+    emu::frontend::CoreManifest expected;
+    if (verified) {
+        std::ifstream manifest(manifest_temp);
+        expected = emu::frontend::parseCoreManifest(manifest);
     }
     std::error_code ignored;
     fs::remove(manifest_temp, ignored);
 
+    if (verified && expected.empty()) {
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
+            ("manifest.txt was downloaded but contains no usable entries.\n\n" +
+             manifest_url +
+             "\n\nEach line must be a 64-character SHA-256 followed by a bare "
+             "filename, for example:\n\n    <sha256>  swanstation_libretro.dll")
+                .c_str(),
+            nullptr);
+        return false;
+    }
+
     for (const std::string& filename : files) {
         const auto entry = expected.find(filename);
-        if (entry == expected.end()) {
+        if (verified && entry == expected.end()) {
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
-                ("manifest.txt does not list " + filename).c_str(), nullptr);
+                ("manifest.txt does not list " + filename +
+                 "\n\nThe manifest was read, but has no entry for this file. "
+                 "Check that the filenames in it match exactly and carry no "
+                 "leading '*'.").c_str(),
+                nullptr);
             return false;
         }
 
@@ -2160,20 +2237,28 @@ bool installCoreFiles(const std::string& server_url) {
         const fs::path destination = core_directory / filename;
         const fs::path temporary = destination.string() + ".download";
         std::error_code cleanup_error;
-        if (!downloadTo(url, temporary)) {
+        if (!downloadTo(url, temporary, download_error)) {
             SDL_ShowSimpleMessageBox(
                 SDL_MESSAGEBOX_ERROR, "Core installation",
-                ("Could not download:\n" + url).c_str(), nullptr);
+                ("Could not download:\n" + url + "\n" + download_error)
+                    .c_str(),
+                nullptr);
             return false;
         }
 
-        const std::string actual = emu::frontend::sha256File(temporary);
-        if (actual.empty() || actual != entry->second) {
-            fs::remove(temporary, cleanup_error);
-            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Core installation",
-                ("Checksum mismatch for " + filename +
-                 "\nThe download was rejected and deleted.").c_str(), nullptr);
-            return false;
+        if (verified) {
+            const std::string actual = emu::frontend::sha256File(temporary);
+            if (actual.empty() || actual != entry->second) {
+                fs::remove(temporary, cleanup_error);
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
+                    "Core installation",
+                    ("Checksum mismatch for " + filename +
+                     "\n\nexpected " + entry->second +
+                     "\ngot      " + (actual.empty() ? "unreadable" : actual) +
+                     "\n\nThe download was rejected and deleted.").c_str(),
+                    nullptr);
+                return false;
+            }
         }
 
         std::error_code replace_error;
@@ -2280,6 +2365,9 @@ int main(int argc, char** argv) {
     std::string system_directory = "system";
     std::string core_server_url =
         "https://8lqb5wp0ujkilwsgmjumf7yi.a.shipwrights.dev/cores/";
+    // Verification is on unless the user explicitly opts out. Cores are
+    // loaded as native code, so an unverified install is a deliberate choice.
+    bool core_server_verify = true;
     std::string library_server_url;
     fs::path games_folder = "games";
     bool mute = settings.mute;
@@ -2314,6 +2402,8 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         } else if (arg == "--core-server" && i + 1 < argc) {
             core_server_url = argv[++i];
+        } else if (arg == "--core-server-unverified") {
+            core_server_verify = false;
         } else if (arg == "--core-server") {
             std::fprintf(stderr, "--core-server requires an HTTPS base URL\n");
             return EXIT_FAILURE;
@@ -2394,7 +2484,7 @@ int main(int argc, char** argv) {
     if (rom_path.empty() && ps1_game_path.empty() && ps2_game_path.empty()) {
         rom_path = showGameMenu(
             games_folder, settings, system_directory, core_server_url,
-            library_server_url);
+            core_server_verify, library_server_url);
         mute = settings.mute;
         fullscreen = settings.fullscreen;
         if (rom_path.empty()) {

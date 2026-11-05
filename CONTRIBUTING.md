@@ -103,6 +103,7 @@ Every core change needs a test. The suites are:
 | `binding_tests` | Button binding tables |
 | `settings_tests` | Settings and per-game override files |
 | `cheat_tests` | Game Genie decoding and cheat files |
+| `manifest_tests` | Core-manifest parsing and its rejection rules |
 | `pytest` | Every library service endpoint |
 
 Use a plain failure counter rather than `assert`. The default build defines

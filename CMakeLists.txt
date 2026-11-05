@@ -74,6 +74,14 @@ add_test(NAME cheats COMMAND cheat_tests)
 set_tests_properties(cheats PROPERTIES
                      WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
+add_executable(manifest_tests
+    tests/test_core_manifest.cpp
+    src/frontend/core_manifest.cpp)
+target_include_directories(manifest_tests PRIVATE src/frontend)
+add_test(NAME manifest COMMAND manifest_tests)
+set_tests_properties(manifest PROPERTIES
+                     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 add_executable(gb_tests systems/gb/test_gb.cpp)
 target_link_libraries(gb_tests PRIVATE emu_core)
 add_test(NAME gameboy COMMAND gb_tests)
@@ -107,6 +115,7 @@ add_executable(emu
     src/frontend/game_metadata.cpp
     src/frontend/artwork_cache.cpp
     src/frontend/cheat_list.cpp
+    src/frontend/core_manifest.cpp
     src/frontend/screenshot.cpp
     src/frontend/save_state_manager.cpp
     src/frontend/crash_logger.cpp
@@ -255,7 +264,7 @@ endif()
 set(CPACK_PACKAGE_NAME "toaster")
 set(CPACK_PACKAGE_VENDOR "Toaster")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A small retro game emulator")
-set(CPACK_PACKAGE_VERSION "0.3.0")
+set(CPACK_PACKAGE_VERSION "0.4.0")
 set(CPACK_GENERATOR "ZIP")
 set(CPACK_VERBATIM_VARIABLES ON)
 

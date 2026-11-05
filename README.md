@@ -149,12 +149,41 @@ SDL-compatible game controllers are supported.
 ## Core installer
 
 The Game Library can download cores from an HTTPS server. The server must
-contain permitted core files in `/cores/`:
+contain the permitted core files and a `manifest.txt` listing their SHA-256
+checksums:
 
 ```text
-swanstation_libretro.dll
-ppsspp_libretro.dll
-pcsx2_libretro.dll
+cores/
+├── manifest.txt
+├── swanstation_libretro.dll
+├── ppsspp_libretro.dll
+└── pcsx2_libretro.dll
+```
+
+Cores are loaded as native code, so every download is checked against the
+manifest and a core that does not match is rejected and deleted. Without a
+manifest, Toaster refuses to install anything.
+
+Generate it in the folder holding the DLLs:
+
+```bash
+# -t forces text mode. Without it, sha256sum on Windows writes "<hash> *name"
+# and the asterisk ends up read as part of the filename.
+sha256sum -t *.dll > manifest.txt
+```
+
+or, on a Windows server:
+
+```powershell
+Get-ChildItem -Filter *.dll | ForEach-Object {
+    "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name
+} | Set-Content -Encoding ascii manifest.txt
+```
+
+Each line is a 64-character checksum followed by a bare filename:
+
+```text
+023fa2f7ec559e58a1c082a3fa2612f8149d8d9b0657371a69b4fad10f9420db  swanstation_libretro.dll
 ```
 
 Start Toaster with:
@@ -163,6 +192,11 @@ Start Toaster with:
 build/emu.exe \
   --core-server "https://your-domain.example/cores"
 ```
+
+If you run the server yourself and accept the risk, `--core-server-unverified`
+installs without a manifest after a confirmation prompt. A tampered download
+would then run as native code with your account's privileges, so prefer
+publishing a manifest.
 
 When you install the full version of toaster you already get the server configured you just need to hit Install Cores in emulator and it will install and compile all the cores for all the emulators that needs some additional cores like: PS consoles
 
