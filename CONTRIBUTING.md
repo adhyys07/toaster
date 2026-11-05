@@ -62,6 +62,28 @@ toolchain stripped off PATH. Windows binds imports before `main()` runs, so a
 zero exit proves nothing is missing. If you change a dependency, that step is
 what will tell you.
 
+## Checking the UI actually draws
+
+Starting is not the same as working. v0.2.0 started cleanly and then showed a
+black window, because the library menu drew its whole frame and never called
+`SDL_RenderPresent`. Every build and every test still passed: `--help` returns
+before a window exists, and nothing in the suite renders a frame.
+
+So before releasing, run the real UI:
+
+```bash
+cmake --build build --target run-tree
+pwsh tools/verify-window.ps1 -Exe build/run/emu.exe -CleanPath
+```
+
+It opens the window, captures it and counts distinct colours. A frame that was
+never presented is a single flat colour; the library is around a hundred. The
+tagged CI build runs the same script against the extracted archive.
+
+If you touch the render loop, check that the script still fails when it should
+-- delete the `SDL_RenderPresent` call, rebuild, and confirm it reports one
+colour.
+
 For the Python library service:
 
 ```bash

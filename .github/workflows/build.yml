@@ -65,6 +65,17 @@ jobs:
           }
           Write-Output "The archive starts with no toolchain on PATH."
 
+      # Starting is not the same as working: v0.2.0 started fine and then drew
+      # a black window, because the library menu never presented its frame.
+      # This opens the real UI and fails if it is blank.
+      - name: Verify the library window renders
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem verify -Recurse -Filter emu.exe |
+                 Select-Object -First 1
+          ./tools/verify-window.ps1 -Exe $exe.FullName -CleanPath
+
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
