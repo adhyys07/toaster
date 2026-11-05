@@ -164,21 +164,25 @@ Cores are loaded as native code, so every download is checked against the
 manifest and a core that does not match is rejected and deleted. Without a
 manifest, Toaster refuses to install anything.
 
-Generate it in the folder holding the DLLs:
+Generate it with the bundled script, from the folder holding the DLLs:
 
 ```bash
-# -t forces text mode. Without it, sha256sum on Windows writes "<hash> *name"
-# and the asterisk ends up read as part of the filename.
-sha256sum -t *.dll > manifest.txt
+tools/make-core-manifest.sh /path/to/cores
 ```
-
-or, on a Windows server:
 
 ```powershell
-Get-ChildItem -Filter *.dll | ForEach-Object {
-    "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash, $_.Name
-} | Set-Content -Encoding ascii manifest.txt
+pwsh tools/make-core-manifest.ps1 -Path C:\cores
 ```
+
+To hash what the server is actually serving, rather than a local copy that may
+have drifted:
+
+```powershell
+pwsh tools/make-core-manifest.ps1 -Url https://your-domain.example/cores
+```
+
+Regenerate the manifest whenever a core changes, or the old checksums will
+reject the new files.
 
 Each line is a 64-character checksum followed by a bare filename:
 
