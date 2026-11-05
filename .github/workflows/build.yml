@@ -30,28 +30,43 @@ jobs:
       - name: Test
         shell: msys2 {0}
         run: ctest --test-dir build --output-on-failure
+      # CPack and the install rules are the single packaging path, so the
+      # archive published here is byte-for-byte what a local
+      # "cpack -G ZIP" produces. The previous hand-rolled copy step was a
+      # second path that could drift, and did: v0.1.0 shipped without the
+      # MinGW runtime DLLs and would not start.
       - name: Package
         if: startsWith(github.ref, 'refs/tags/')
         shell: msys2 {0}
         run: |
           set -euo pipefail
-          mkdir -p package
-          cp build/emu.exe README.md package/
-          cp -r assets package/assets
-          # SDL2_ttf pulls in freetype and harfbuzz, which pull in more again.
-          # Walking ldd is the only reliable way to catch the whole chain; a
-          # hand-written list goes stale and the archive then fails to start.
-          ldd build/emu.exe build/*.dll \
-            | awk '$3 ~ /mingw64/ { print $3 }' \
-            | sort -u \
-            | while read -r dll; do cp -v "$dll" package/; done
-          ls -l package
-      - name: Archive
+          cd build && cpack -G ZIP
+          unzip -l toaster-windows-x64.zip | tail -5
+
+      # The reviewer who caught the missing DLLs did this by hand. Stripping
+      # the toolchain off PATH makes any unpackaged DLL fail to resolve, and
+      # because Windows binds imports before main() runs, --help exiting zero
+      # proves every one of them is present.
+      - name: Verify the archive starts without the toolchain
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
-        run: Compress-Archive package toaster-windows.zip
+        run: |
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+
+          Expand-Archive build/toaster-windows-x64.zip `
+                         -DestinationPath verify -Force
+          $exe = Get-ChildItem verify -Recurse -Filter emu.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "emu.exe is not in the archive" }
+
+          & $exe.FullName --help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "emu.exe exited $LASTEXITCODE with a clean PATH; a DLL is missing from the archive"
+          }
+          Write-Output "The archive starts with no toolchain on PATH."
+
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: toaster-windows.zip
+          files: build/toaster-windows-x64.zip

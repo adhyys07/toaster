@@ -1,13 +1,14 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.21)
+if(POLICY CMP0177)
+    cmake_policy(SET CMP0177 NEW)
+endif()
+if(POLICY CMP0207)
+    cmake_policy(SET CMP0207 NEW)
+endif()
+
 project(emu LANGUAGES C CXX)
 
 include(GNUInstallDirs)
-include(CPack)
-
-set(CPACK_PACKAGE_NAME "toaster")
-set(CPACK_PACKAGE_VERSION "0.1.0")
-set(CPACK_GENERATOR "ZIP")
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -78,12 +79,8 @@ target_link_libraries(gb_tests PRIVATE emu_core)
 add_test(NAME gameboy COMMAND gb_tests)
 set_tests_properties(gameboy PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
-# The library UI scans on a worker thread, so threading is needed on every
-# platform rather than only on Unix.
 find_package(Threads REQUIRED)
 
-# The library client speaks HTTPS, which means a real TLS stack rather than the
-# raw sockets it used before.
 find_package(CURL REQUIRED)
 
 find_package(SDL2 REQUIRED)
@@ -124,36 +121,47 @@ target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 
 if(MINGW)
-    # Without this the executable needs libstdc++-6.dll and libgcc_s_seh-1.dll
-    # from the build machine's toolchain, which the release archive does not
-    # contain, so it fails to start elsewhere with STATUS_DLL_NOT_FOUND.
     target_link_options(emu PRIVATE -static-libgcc -static-libstdc++)
 endif()
 
 add_custom_command(TARGET emu POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders"
-            "$<TARGET_FILE_DIR:emu>/assets/shaders")
-
-add_custom_command(TARGET emu POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
             "${CMAKE_CURRENT_SOURCE_DIR}/assets" "$<TARGET_FILE_DIR:emu>/assets")
-install(DIRECTORY assets/fonts DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
-
-install(TARGETS emu RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY assets/shaders
-        DESTINATION ${CMAKE_INSTALL_BINDIR}/assets)
-install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
-
-set(CPACK_PACKAGE_NAME "toaster")
-set(CPACK_PACKAGE_VENDOR "Toaster")
-set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A small retro game emulator")
-set(CPACK_PACKAGE_VERSION "0.1.0")
-set(CPACK_GENERATOR "ZIP")
 
 if(WIN32)
-    # Find the actual import library path so MinGW links libopengl32.a instead
-    # of passing the MSVC-style name "opengl32.lib" to its linker.
+    set(TOASTER_INSTALL_BINDIR ".")
+else()
+    set(TOASTER_INSTALL_BINDIR "${CMAKE_INSTALL_BINDIR}")
+endif()
+
+install(DIRECTORY assets/shaders
+        DESTINATION ${TOASTER_INSTALL_BINDIR}/assets)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts")
+    install(DIRECTORY assets/fonts
+            DESTINATION ${TOASTER_INSTALL_BINDIR}/assets)
+endif()
+install(FILES README.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+if(WIN32)
+    get_filename_component(TOASTER_TOOLCHAIN_BIN "${CMAKE_CXX_COMPILER}" DIRECTORY)
+
+    install(TARGETS emu
+            RUNTIME_DEPENDENCY_SET toaster_runtime
+            RUNTIME DESTINATION ${TOASTER_INSTALL_BINDIR})
+
+    install(RUNTIME_DEPENDENCY_SET toaster_runtime
+            PRE_EXCLUDE_REGEXES
+                "^api-ms-win-.*" "^ext-ms-.*"
+            POST_EXCLUDE_REGEXES
+                "[Ss]ystem32" "SysWOW64" "[Ww]indows[\\/]"
+            DIRECTORIES
+                "${TOASTER_TOOLCHAIN_BIN}"
+            DESTINATION ${TOASTER_INSTALL_BINDIR})
+else()
+    install(TARGETS emu RUNTIME DESTINATION ${TOASTER_INSTALL_BINDIR})
+endif()
+
+if(WIN32)
     find_library(OPENGL32_LIBRARY NAMES opengl32)
     if(NOT OPENGL32_LIBRARY)
         message(FATAL_ERROR "Could not find the Windows OpenGL library (opengl32)")
@@ -179,10 +187,6 @@ else()
 endif()
 
 find_package(SDL2_image REQUIRED)
-# The imported target is preferred, but MSYS2's sdl2_image-config.cmake builds
-# its import library name as "SDL2_image.dll.lib", which does not exist in a
-# MinGW prefix. When that happens the library is located by hand instead, the
-# same way the SDL2_ttf block below does.
 set(SDL2_IMAGE_TARGET_USABLE FALSE)
 if(TARGET SDL2_image::SDL2_image)
     get_target_property(SDL2_IMAGE_IMPLIB SDL2_image::SDL2_image IMPORTED_IMPLIB)
@@ -228,19 +232,16 @@ else()
     target_link_libraries(emu PRIVATE ${SDL2_LIBRARIES})
 endif()
 
-if(WIN32 AND TARGET SDL2::SDL2)
-    add_custom_command(TARGET emu POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:emu>)
+set(CPACK_PACKAGE_NAME "toaster")
+set(CPACK_PACKAGE_VENDOR "Toaster")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A small retro game emulator")
+set(CPACK_PACKAGE_VERSION "0.1.0")
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_VERBATIM_VARIABLES ON)
+
+if(WIN32)
+    set(CPACK_PACKAGE_FILE_NAME "toaster-windows-x64")
+    set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY OFF)
 endif()
 
-if(WIN32 AND SDL2_TTF_LINK_LIBRARY)
-    get_filename_component(SDL2_TTF_LIB_DIR "${SDL2_TTF_LINK_LIBRARY}" DIRECTORY)
-    get_filename_component(SDL2_TTF_PREFIX "${SDL2_TTF_LIB_DIR}/.." ABSOLUTE)
-    set(SDL2_TTF_RUNTIME_DLL "${SDL2_TTF_PREFIX}/bin/SDL2_ttf.dll")
-    if(EXISTS "${SDL2_TTF_RUNTIME_DLL}")
-        add_custom_command(TARGET emu POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    "${SDL2_TTF_RUNTIME_DLL}" $<TARGET_FILE_DIR:emu>)
-    endif()
-endif()
+include(CPack)
