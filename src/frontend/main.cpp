@@ -889,6 +889,9 @@ std::string showGameMenu(const fs::path& folder,
                          "F toggles favorite. / searches. Double-click or Enter launches.",
                          28, 602, muted, 820);
 
+            // Without this the whole frame is drawn to the back buffer and
+            // never shown, which leaves the window black.
+            SDL_RenderPresent(menu_renderer);
             redraw = false;
         }
 

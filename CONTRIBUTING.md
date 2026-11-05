@@ -25,12 +25,20 @@ Dependencies: CMake 3.21 or newer, Ninja, a C++17 compiler, Python 3, SDL2,
 SDL2_ttf, SDL2_image, and libcurl.
 
 The build tree does not contain the runtime DLLs, so `build/emu.exe` only
-runs with the toolchain on PATH, which is the normal case inside an MSYS2
-MinGW shell. For a tree that runs anywhere, install it:
+runs from a shell that has the toolchain on PATH — the normal case inside an
+MSYS2 MinGW shell. Launching it from Explorer fails with "SDL2.dll was not
+found", because Windows resolves imports before `main()` runs.
+
+For a double-clickable tree with every DLL beside the executable:
 
 ```bash
-cmake --install build --prefix run
+cmake --build build --target run-tree    # writes build/run
 ```
+
+The DLLs cannot simply be copied next to `build/emu.exe`: the packaging scan
+searches the executable's own directory first, so each one would resolve from
+both there and the toolchain, and the install fails with "Multiple conflicting
+paths found".
 
 ## Packaging
 

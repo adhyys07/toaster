@@ -232,6 +232,26 @@ else()
     target_link_libraries(emu PRIVATE ${SDL2_LIBRARIES})
 endif()
 
+# build/emu.exe has no DLLs beside it, so launching it from Explorer fails with
+# "SDL2.dll was not found" before main() runs. Staging them next to the
+# executable is not an option: the packaging scan searches the executable's own
+# directory first, so each DLL would resolve from both there and the toolchain
+# and the install fails with "Multiple conflicting paths found".
+#
+# A complete, double-clickable tree is assembled in build/run instead:
+#     cmake --build build --target run-tree
+#
+# Running build/emu.exe directly still works from a shell that has the
+# toolchain on PATH, which is the normal development case.
+if(WIN32)
+    add_custom_target(run-tree
+        COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}"
+                --prefix "${CMAKE_BINARY_DIR}/run"
+        DEPENDS emu
+        USES_TERMINAL
+        COMMENT "Staging a runnable tree with every DLL in build/run")
+endif()
+
 set(CPACK_PACKAGE_NAME "toaster")
 set(CPACK_PACKAGE_VENDOR "Toaster")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "A small retro game emulator")
