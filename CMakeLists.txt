@@ -121,6 +121,13 @@ add_executable(emu
     src/frontend/crash_logger.cpp
     src/frontend/library_client.cpp
     src/frontend/game_library.cpp
+    src/frontend/ui/text_cache.cpp
+    src/frontend/ui/painter.cpp
+    src/frontend/ui/layout.cpp
+    src/frontend/ui/widgets.cpp
+    src/frontend/ui/game_view.cpp
+    src/frontend/ui/input_map.cpp
+    src/frontend/ui/library_screen.cpp
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
@@ -240,6 +247,38 @@ else()
     target_include_directories(emu PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(emu PRIVATE ${SDL2_LIBRARIES})
 endif()
+
+# ui_tests has to come after SDL2_ttf is found, because it links it: the
+# filtering, fuzzy search, layout arithmetic and ellipsizing are all pure
+# logic with no window, but measuring text still needs TTF.
+add_executable(ui_tests
+    tests/test_ui.cpp
+    src/frontend/ui/game_view.cpp
+    src/frontend/ui/layout.cpp
+    src/frontend/ui/text_cache.cpp
+    src/frontend/ui_font.cpp)
+target_include_directories(ui_tests PRIVATE src/frontend)
+
+if(TARGET SDL2::SDL2)
+    target_link_libraries(ui_tests PRIVATE SDL2::SDL2)
+else()
+    target_include_directories(ui_tests PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(ui_tests PRIVATE ${SDL2_LIBRARIES})
+endif()
+
+if(TARGET SDL2_ttf::SDL2_ttf)
+    target_link_libraries(ui_tests PRIVATE SDL2_ttf::SDL2_ttf)
+elseif(TARGET SDL2_ttf::SDL2_ttf-static)
+    target_link_libraries(ui_tests PRIVATE SDL2_ttf::SDL2_ttf-static)
+else()
+    target_include_directories(ui_tests PRIVATE "${SDL2_TTF_INCLUDE_DIR}")
+    target_link_libraries(ui_tests PRIVATE "${SDL2_TTF_LINK_LIBRARY}")
+endif()
+
+add_test(NAME ui COMMAND ui_tests)
+set_tests_properties(ui PROPERTIES
+                     WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+
 
 # build/emu.exe has no DLLs beside it, so launching it from Explorer fails with
 # "SDL2.dll was not found" before main() runs. Staging them next to the

@@ -39,6 +39,8 @@
 #include "bios_manager.h"
 #include "sha256.h"
 #include "save_state_manager.h"
+#include "game_entry.h"
+#include "ui/library_screen.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -77,18 +79,9 @@ void printUsage(const char* exe) {
 
 namespace fs = std::filesystem;
 
-struct GameEntry
-{
-    fs::path path;
-    std::string title;
-    std::string developer = "Unknown";
-    std::string year = "Unknown";
-    std::string genre = "Unknown";
-    std::string description = "No description provided.";
-    std::string artwork;
-    std::string tags;
-    bool favorite = false;
-};
+// Moved to game_entry.h so the library screen can name it too. The alias
+// keeps every use below unqualified.
+using GameEntry = emu::frontend::GameEntry;
 
 std::string gamePathKey(const fs::path& path) {
     // Same normalization the library service matching uses, so favorites.txt
@@ -196,25 +189,6 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
     return games;
 }
 
-std::vector<GameEntry> filterGames(const std::vector<GameEntry>& games,
-                                   const std::string& query) {
-    if (query.empty()) return games;
-
-    std::string wanted = query;
-    std::transform(wanted.begin(), wanted.end(), wanted.begin(),
-        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-
-    std::vector<GameEntry> filtered;
-    for (const GameEntry& game : games) {
-        std::string title = game.title;
-        std::transform(title.begin(), title.end(), title.begin(),
-            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        if (title.find(wanted) != std::string::npos) {
-            filtered.push_back(game);
-        }
-    }
-    return filtered;
-}
 
 
 void showDebugInfo(const emu::System& system) {
@@ -631,6 +605,66 @@ std::string showGameMenu(const fs::path& folder,
         }
         return true;
     };
+    // Records a launch with the library service. Failures are logged rather
+    // than surfaced: the game is already starting and there is nothing the
+    // user can do about it.
+    const auto markPlayed = [&](const std::string& path) {
+        if (!library || scanning) return;
+        const emu::frontend::RemoteGame* remote = library->find(path);
+        if (!remote) return;
+        std::string library_error;
+        if (!library->markPlayed(*remote, library_error)) {
+            std::fprintf(stderr, "Could not update recent games: %s\n",
+                         library_error.c_str());
+        }
+    };
+
+    // Flipping a favourite finds the game by path. The screen's selection
+    // indexes a filtered view, so looking the game up by that index in
+    // `games` or in the service's rows would favourite a different one
+    // whenever a filter or a search is active.
+    //
+    // False means the flag did not persist, which the screen reports.
+    const auto setFavorite = [&](const std::string& path, bool favorite) {
+        const std::string key = gamePathKey(fs::path(path));
+        for (GameEntry& game : games) {
+            if (gamePathKey(game.path) == key) {
+                game.favorite = favorite;
+                break;
+            }
+        }
+
+        if (library && scanning) {
+            // Deferring beats racing the worker, which owns the library's
+            // rows until it finishes. The local flag above still shows the
+            // new state.
+            return false;
+        }
+
+        if (library) {
+            const emu::frontend::RemoteGame* remote = library->find(path);
+            if (!remote) {
+                std::fprintf(stderr,
+                             "The library service does not know %s\n",
+                             key.c_str());
+                return false;
+            }
+            std::string library_error;
+            if (!library->setFavorite(*remote, favorite, library_error)) {
+                std::fprintf(stderr, "Could not set favorite: %s\n",
+                             library_error.c_str());
+                return false;
+            }
+            adoptLibraryGames();
+            return true;
+        }
+
+        return saveFavorites(games);
+    };
+
+    // TTF and this font stay up for the settings and controller windows,
+    // which still create their own window. The library screen opens its own
+    // TextCache and does not use either.
     if (TTF_Init() != 0) {
         std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
         return {};
@@ -644,487 +678,35 @@ std::string showGameMenu(const fs::path& folder,
         return {};
     }
 
-
-    SDL_Window* menu_window = SDL_CreateWindow(
-        "Emulator Game Library", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1000, 650, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-    SDL_Renderer* menu_renderer = menu_window
-        ? SDL_CreateRenderer(menu_window, -1, SDL_RENDERER_ACCELERATED)
-        : nullptr;
-    if (!menu_renderer && menu_window) {
-        menu_renderer = SDL_CreateRenderer(menu_window, -1, SDL_RENDERER_SOFTWARE);
-    }
-    if (!menu_window || !menu_renderer) {
-        std::fprintf(stderr, "Could not create game menu: %s\n", SDL_GetError());
-        if (menu_renderer) SDL_DestroyRenderer(menu_renderer);
-        if (menu_window) SDL_DestroyWindow(menu_window);
-        TTF_CloseFont(font);
-        TTF_Quit();
-        return {};
-    }
-
-    // Cover art is optional: the cache reports whether image support came up,
-    // and the detail pane falls back to a placeholder when it did not.
-    emu::frontend::ArtworkCache artwork(menu_renderer);
-
-    size_t selected = 0;
-    size_t first_visible = 0;
-    constexpr int row_height = 34;
-    constexpr int list_top = 128;
-    constexpr size_t visible_rows = 12;
-    const SDL_Rect launch_button{510, 548, 130, 44};
-    const SDL_Rect open_button{650, 548, 140, 44};
-    const SDL_Rect rescan_button{800, 548, 150, 44};
-    const SDL_Rect settings_button{830, 24, 130, 40};
-    const SDL_Rect ps1_bios_button{510, 24, 145, 40};
-    const SDL_Rect bios_button{670, 24, 145, 40};
-    const SDL_Rect cores_button{510, 70, 145, 40};
-    bool running = true;
-    bool redraw = true;
-    std::string result;
-    std::string search;
-    bool search_active = false;
-    const auto markPlayed = [&](const GameEntry& game) {
-        if (!library) return;
-        // A scan in flight owns the library's cached rows.
-        if (scanning) return;
-        const emu::frontend::RemoteGame* remote = library->find(game.path);
-        if (!remote) return;
-        std::string library_error;
-        if (!library->markPlayed(*remote, library_error)) {
-            std::fprintf(stderr, "Could not update recent games: %s\n",
-                         library_error.c_str());
-        }
+    emu::frontend::ui::LibraryActions actions;
+    actions.collectScan = collectScan;
+    actions.isScanning = [&] { return scanning; };
+    actions.rescan = rescanGames;
+    actions.setFavorite = setFavorite;
+    actions.markPlayed = markPlayed;
+    actions.browseForGame = [] { return chooseRomFile(); };
+    actions.openSettings = [&] { showSettingsMenu(settings, font); };
+    actions.installPs1Bios = [&] {
+        importBios(emu::frontend::BiosSystem::Ps1, system_directory);
     };
-    while (running) {
-        // A finished background scan replaces the list, so the frame after it
-        // lands has to redraw.
-        if (collectScan()) redraw = true;
+    actions.installPs2Bios = [&] {
+        importBios(emu::frontend::BiosSystem::Ps2, system_directory);
+    };
+    actions.installCores = [&] {
+        installCoreFiles(core_server_url, core_server_verify);
+    };
+    actions.statusLine = [&]() -> std::string {
+        // GameLibrary is not thread safe, so its totals cannot be read while
+        // a scan owns them.
+        if (!library || scanning) return {};
+        const emu::frontend::LibraryStatistics& stats = library->statistics();
+        return "Total " + std::to_string(stats.total) + "   Plays " +
+               std::to_string(stats.plays);
+    };
 
-        if (redraw) {
-            const std::vector<GameEntry> visible_games =
-                filterGames(games, search);
-            if (visible_games.empty()) {
-                selected = 0;
-                first_visible = 0;
-            } else {
-                selected = std::min(selected, visible_games.size() - 1);
-                if (visible_games.size() <= visible_rows) {
-                    first_visible = 0;
-                } else {
-                    first_visible = std::min(
-                        first_visible, visible_games.size() - visible_rows);
-                    if (selected < first_visible)
-                        first_visible = selected;
-                    if (selected >= first_visible + visible_rows)
-                        first_visible = selected - visible_rows + 1;
-                }
-            }
-            const SDL_Color background{13, 18, 28, 255};
-            const SDL_Color panel{22, 30, 44, 255};
-            const SDL_Color panel_border{45, 59, 78, 255};
-            const SDL_Color accent{83, 190, 216, 255};
-            const SDL_Color gold{244, 202, 111, 255};
-            const SDL_Color white{235, 241, 249, 255};
-            const SDL_Color muted{143, 158, 178, 255};
+    const std::string result =
+        emu::frontend::ui::runLibraryScreen(games, folder, actions);
 
-            SDL_SetRenderDrawColor(menu_renderer,
-                                   background.r, background.g,
-                                   background.b, background.a);
-            SDL_RenderClear(menu_renderer);
-
-            TTF_SetFontStyle(font, TTF_STYLE_BOLD);
-            drawMenuText(menu_renderer, font, "TOASTER", 28, 18, accent);
-            TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
-            drawMenuText(menu_renderer, font, "GAME LIBRARY", 28, 48, muted);
-
-            int mouse_x = 0;
-            int mouse_y = 0;
-            SDL_GetMouseState(&mouse_x, &mouse_y);
-            drawMenuButton(menu_renderer, font, settings_button, "Settings",
-                           mouse_x, mouse_y);
-            drawMenuButton(menu_renderer, font, bios_button, "Install PS2 BIOS",
-                           mouse_x, mouse_y);
-            drawMenuButton(menu_renderer, font, cores_button, "Install Cores",
-                           mouse_x, mouse_y);
-
-            const SDL_Rect list_panel{20, 94, 440, 442};
-            const SDL_Rect details_panel{474, 94, 506, 442};
-            drawMenuPanel(menu_renderer, list_panel,
-                          panel, panel_border, accent);
-            drawMenuPanel(menu_renderer, details_panel,
-                          panel, panel_border, gold);
-
-            TTF_SetFontStyle(font, TTF_STYLE_BOLD);
-            drawMenuText(menu_renderer, font, "YOUR GAMES", 36, 102, white);
-            drawMenuText(menu_renderer, font, "GAME DETAILS", 496, 102, white);
-            TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
-
-            const std::string count = std::to_string(visible_games.size()) +
-                (visible_games.size() == 1 ? " game" : " games");
-            drawMenuText(menu_renderer, font, count, 340, 103, muted);
-            if (scanning) {
-                // The worker owns the library's state until it finishes, so
-                // the totals cannot be read here.
-                drawMenuText(menu_renderer, font, "Scanning the library...",
-                             36, 560, gold);
-            } else if (library) {
-                drawMenuText(menu_renderer, font,
-                             "Total " +
-                                 std::to_string(library->statistics().total) +
-                                 "  Plays " +
-                                 std::to_string(library->statistics().plays),
-                             36, 560, muted);
-            }
-            drawMenuText(menu_renderer, font,
-                         search_active ? "Search: " + search
-                                       : "Press / to search",
-                         36, 76, search_active ? gold : muted, 400);
-
-            if (visible_games.empty()) {
-                drawMenuText(menu_renderer, font, "No games found yet",
-                             42, 151, gold);
-                drawMenuText(menu_renderer, font,
-                             "Add supported games to this folder:",
-                             42, 190, white);
-                drawMenuText(menu_renderer, font, folder.string(),
-                             42, 226, muted, 390);
-                drawMenuText(menu_renderer, font,
-                             "Press Rescan after adding games.",
-                             42, 278, muted);
-                drawMenuText(menu_renderer, font, "Nothing selected",
-                             500, 154, muted);
-            } else {
-                for (size_t row = 0;
-                     row < visible_rows &&
-                     first_visible + row < visible_games.size(); ++row) {
-                    const size_t index = first_visible + row;
-                    SDL_Rect item{32, list_top + static_cast<int>(row) * row_height,
-                                  416, row_height - 4};
-                    if (index == selected) {
-                        fillRoundedRect(menu_renderer, item, 7,
-                                        SDL_Color{43, 76, 98, 255});
-                        SDL_Rect marker{item.x, item.y + 5, 3, item.h - 10};
-                        SDL_SetRenderDrawColor(menu_renderer,
-                                               accent.r, accent.g,
-                                               accent.b, accent.a);
-                        SDL_RenderFillRect(menu_renderer, &marker);
-                    }
-
-                    const std::string label =
-                        (visible_games[index].favorite ? "* " : "  ") +
-                        visible_games[index].title;
-                    drawMenuText(menu_renderer, font, label,
-                                 item.x + 14, item.y + 4,
-                                 index == selected ? gold : white, 385);
-                }
-
-                const GameEntry& game = visible_games[selected];
-
-                // Cover art sits at the left of the detail pane with the
-                // metadata beside it, so the description below keeps the full
-                // width of the pane.
-                const SDL_Rect art_box{500, 148, 150, 200};
-                constexpr int kDetailX = 666;
-                constexpr int kDetailWrap = 284;
-
-                if (SDL_Texture* art = artwork.get(game.artwork)) {
-                    int art_w = 0;
-                    int art_h = 0;
-                    SDL_QueryTexture(art, nullptr, nullptr, &art_w, &art_h);
-                    // Letterbox rather than stretch: covers are not all the
-                    // same aspect ratio.
-                    const double scale = std::min(
-                        static_cast<double>(art_box.w) / art_w,
-                        static_cast<double>(art_box.h) / art_h);
-                    SDL_Rect fit{0, 0,
-                                 static_cast<int>(art_w * scale),
-                                 static_cast<int>(art_h * scale)};
-                    fit.x = art_box.x + (art_box.w - fit.w) / 2;
-                    fit.y = art_box.y + (art_box.h - fit.h) / 2;
-                    SDL_RenderCopy(menu_renderer, art, nullptr, &fit);
-                } else {
-                    SDL_SetRenderDrawColor(menu_renderer, 28, 32, 40, 255);
-                    SDL_RenderFillRect(menu_renderer, &art_box);
-                    SDL_SetRenderDrawColor(menu_renderer,
-                                           panel_border.r, panel_border.g,
-                                           panel_border.b, panel_border.a);
-                    SDL_RenderDrawRect(menu_renderer, &art_box);
-                    drawMenuText(menu_renderer, font, "No cover",
-                                 art_box.x + 38, art_box.y + 90, muted);
-                }
-
-                TTF_SetFontStyle(font, TTF_STYLE_BOLD);
-                drawMenuText(menu_renderer, font, game.title,
-                             kDetailX, 148, gold, kDetailWrap);
-                TTF_SetFontStyle(font, TTF_STYLE_NORMAL);
-                drawMenuText(menu_renderer, font,
-                             "Developer  " + game.developer,
-                             kDetailX, 204, white, kDetailWrap);
-                drawMenuText(menu_renderer, font, "Year       " + game.year,
-                             kDetailX, 240, white);
-                drawMenuText(menu_renderer, font, "Genre      " + game.genre,
-                             kDetailX, 276, white, kDetailWrap);
-                drawMenuText(menu_renderer, font,
-                             "Tags       " +
-                                 (game.tags.empty() ? "None" : game.tags),
-                             kDetailX, 312, muted, kDetailWrap);
-
-                SDL_Rect separator{500, 360, 450, 1};
-                SDL_SetRenderDrawColor(menu_renderer,
-                                       panel_border.r, panel_border.g,
-                                       panel_border.b, panel_border.a);
-                SDL_RenderFillRect(menu_renderer, &separator);
-                drawMenuText(menu_renderer, font, "DESCRIPTION",
-                             500, 372, muted);
-                drawMenuText(menu_renderer, font, game.description,
-                             500, 400, white, 445);
-                drawMenuText(menu_renderer, font,
-                             game.favorite ? "Favorite" : "Not a favorite",
-                             500, 500, game.favorite ? gold : muted);
-            }
-
-            drawMenuButton(menu_renderer, font, launch_button, "Launch",
-                           mouse_x, mouse_y);
-            drawMenuButton(menu_renderer, font, open_button, "Open Game",
-                           mouse_x, mouse_y);
-            drawMenuButton(menu_renderer, font, rescan_button, "Rescan",
-                           mouse_x, mouse_y);
-            drawMenuText(menu_renderer, font,
-                         "F toggles favorite. / searches. Double-click or Enter launches.",
-                         28, 602, muted, 820);
-
-            // Without this the whole frame is drawn to the back buffer and
-            // never shown, which leaves the window black.
-            SDL_RenderPresent(menu_renderer);
-            redraw = false;
-        }
-
-        SDL_Event event;
-        if (!SDL_WaitEvent(&event)) continue;
-
-        do {
-            const std::vector<GameEntry> visible_games =
-                filterGames(games, search);
-            switch (event.type) {
-            case SDL_QUIT:
-                running = false;
-                break;
-            case SDL_MOUSEMOTION:
-                redraw = true;
-                break;
-            case SDL_KEYDOWN:
-                switch (event.key.keysym.sym) {
-                case SDLK_ESCAPE:
-                    if (search_active) {
-                        search.clear();
-                        search_active = false;
-                        SDL_StopTextInput();
-                        selected = 0;
-                        first_visible = 0;
-                        redraw = true;
-                    } else {
-                        running = false;
-                    }
-                    break;
-                case SDLK_BACKSPACE:
-                    if (search_active && !search.empty()) {
-                        search.pop_back();
-                        selected = 0;
-                        first_visible = 0;
-                        redraw = true;
-                    }
-                    break;
-                case SDLK_SLASH:
-                    search_active = true;
-                    SDL_StartTextInput();
-                    redraw = true;
-                    break;
-                case SDLK_f:
-                    if (!visible_games.empty()) {
-                        // `selected` indexes the filtered list, so the game to
-                        // flip has to be found by path: indexing `games` or the
-                        // service's rows with it favorites a different game
-                        // whenever a search is active.
-                        const fs::path chosen = visible_games[selected].path;
-                        const std::string path = gamePathKey(chosen);
-                        bool favorite = false;
-                        for (GameEntry& game : games) {
-                            if (gamePathKey(game.path) == path) {
-                                game.favorite = !game.favorite;
-                                favorite = game.favorite;
-                                break;
-                            }
-                        }
-                        std::string library_error;
-                        if (library && scanning) {
-                            // Deferring is better than racing the worker; the
-                            // local flag above still shows the new state.
-                            std::fprintf(stderr,
-                                         "Library is scanning; favorite not "
-                                         "sent to the service\n");
-                        } else if (library) {
-                            const emu::frontend::RemoteGame* remote =
-                                library->find(chosen);
-                            if (!remote) {
-                                std::fprintf(stderr,
-                                             "The library service does not know %s\n",
-                                             path.c_str());
-                            } else if (!library->setFavorite(
-                                           *remote, favorite, library_error)) {
-                                std::fprintf(stderr, "Could not set favorite: %s\n",
-                                             library_error.c_str());
-                            } else {
-                                adoptLibraryGames();
-                            }
-                        } else if (!saveFavorites(games)) {
-                            std::fprintf(stderr,
-                                         "Could not save favorites\n");
-                        }
-                        redraw = true;
-                    }
-                    break;
-                case SDLK_UP:
-                    if (selected > 0 && !visible_games.empty()) --selected;
-                    redraw = true;
-                    break;
-                case SDLK_DOWN:
-                    if (selected + 1 < visible_games.size()) ++selected;
-                    redraw = true;
-                    break;
-                case SDLK_r:
-                    rescanGames();
-                    selected = 0;
-                    first_visible = 0;
-                    redraw = true;
-                    break;
-                case SDLK_s:
-                    showSettingsMenu(settings, font);
-                    redraw = true;
-                    break;
-                case SDLK_b:
-                    importBios(emu::frontend::BiosSystem::Ps2, system_directory);
-                    redraw = true;
-                    break;
-                case SDLK_o: {
-                    const std::string chosen_rom = chooseRomFile();
-                    if (!chosen_rom.empty()) {
-                        result = chosen_rom;
-                        running = false;
-                    }
-                    break;
-                }
-                case SDLK_RETURN:
-                case SDLK_KP_ENTER:
-                    if (!visible_games.empty()) {
-                        markPlayed(visible_games[selected]);
-                        result = visible_games[selected].path.string();
-                        running = false;
-                    }
-                break;
-                default:
-                    break;
-                }
-                break;
-            case SDL_MOUSEWHEEL:
-                if (event.wheel.y > 0 && selected > 0 &&
-                    !visible_games.empty()) --selected;
-                if (event.wheel.y < 0 &&
-                    selected + 1 < visible_games.size()) ++selected;
-                redraw = true;
-                break;
-            case SDL_TEXTINPUT:
-                if (search_active) {
-                    search += event.text.text;
-                    selected = 0;
-                    first_visible = 0;
-                    redraw = true;
-                }
-                break;
-            case SDL_MOUSEBUTTONDOWN:
-                if (event.button.button != SDL_BUTTON_LEFT) break;
-
-                if (pointInside(settings_button, event.button.x, event.button.y)) {
-                    showSettingsMenu(settings, font);
-                    redraw = true;
-                    break;
-                }
-
-                if (pointInside(ps1_bios_button,event.button.x, event.button.y)) {
-                    importBios(emu::frontend::BiosSystem::Ps1, system_directory);
-                    redraw = true;
-                    break;
-                }
-
-                if (pointInside(cores_button, event.button.x, event.button.y)) {
-                    installCoreFiles(core_server_url, core_server_verify);
-                    redraw = true;
-                    break;
-                }
-
-                if (pointInside(bios_button, event.button.x, event.button.y)) {
-                    importBios(emu::frontend::BiosSystem::Ps2, system_directory);
-                    redraw = true;
-                    break;
-                }
-
-                if (pointInside(launch_button, event.button.x, event.button.y)) {
-                    if (!visible_games.empty()) {
-                        markPlayed(visible_games[selected]);
-                        result = visible_games[selected].path.string();
-                        running = false;
-                    }
-                    break;
-                }
-
-                if (pointInside(open_button, event.button.x, event.button.y)) {
-                    const std::string chosen_rom = chooseRomFile();
-                    if (!chosen_rom.empty()) {
-                        result = chosen_rom;
-                        running = false;
-                    }
-                    break;
-                }
-
-                if (pointInside(rescan_button, event.button.x, event.button.y)) {
-                    rescanGames();
-                    selected = 0;
-                    first_visible = 0;
-                    redraw = true;
-                    break;
-                }
-
-                if (event.button.x >= 24 && event.button.x < 444 &&
-                    event.button.y >= list_top &&
-                    event.button.y < list_top + static_cast<int>(visible_rows) * row_height) {
-                    const size_t row = static_cast<size_t>(
-                        (event.button.y - list_top) / row_height);
-                    const size_t index = first_visible + row;
-                    if (index < visible_games.size()) {
-                        selected = index;
-                        redraw = true;
-                        if (event.button.clicks >= 2) {
-                            markPlayed(visible_games[index]);
-                            result = visible_games[index].path.string();
-                            running = false;
-                        }
-                    }
-                }
-                break;
-            default:
-                break;
-            }
-
-            first_visible = selected >= visible_rows
-                ? selected - visible_rows + 1
-                : 0;
-        } while (SDL_PollEvent(&event));
-    }
-
-    // The textures belong to the renderer, so they are released first.
-    artwork.clear();
-    SDL_DestroyRenderer(menu_renderer);
-    SDL_DestroyWindow(menu_window);
     TTF_CloseFont(font);
     TTF_Quit();
     return result;
