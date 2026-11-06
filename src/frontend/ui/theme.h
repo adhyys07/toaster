@@ -32,6 +32,8 @@ struct Metrics
 
     int pad() const { return px(18); }
     int gap() const { return px(14); }
+    // Panels and grid cells. radius_small() is for buttons, chips and rows.
+    int radius() const { return px(10); }
     int radius_small() const { return px(6); }
     int border() const { return px(1) > 0 ? px(1) : 1; }
     int row_height() const { return px(44); }
