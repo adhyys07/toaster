@@ -32,7 +32,6 @@ struct Metrics
 
     int pad() const { return px(18); }
     int gap() const { return px(14); }
-    int radius() const { return px(10); }
     int radius_small() const { return px(6); }
     int border() const { return px(1) > 0 ? px(1) : 1; }
     int row_height() const { return px(44); }
@@ -42,7 +41,6 @@ struct Metrics
     int chip_height() const { return px(28); }
     int search_height() const { return px(36); }
     int scrollbar_width() const { return px(6); }
-
 };
 
 
