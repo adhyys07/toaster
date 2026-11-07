@@ -2,6 +2,8 @@
 
 #include "../artwork_cache.h"
 #include "controller_view.h"
+#include "gallery.h"
+#include "game_overlay.h"
 #include "game_view.h"
 #include "input_map.h"
 #include "layout.h"
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <initializer_list>
 #include <string>
 #include <utility>
@@ -45,6 +48,8 @@ enum : WidgetId {
     kIdToggleView,
     kIdTheme,
     kIdSearchField,
+    kIdGallery,
+    kIdOverlay,
 
     kIdChipFirst = 100,
     kIdRowFirst = 1000
@@ -56,12 +61,12 @@ struct ChipSpec {
     SystemId system;
 };
 
-// Recent is deliberately absent: GameEntry carries no last-played timestamp.
-// The library service has one, but adoptLibraryGames in main.cpp does not copy
-// it, so a Recent chip would silently show everything. Plumb that field
-// through first.
+// Recent needs GameEntry::last_played, which adoptLibraryGames and the local
+// recent.ini both fill now. The view forces a last-played sort for this chip:
+// a title-ordered "recent" buries whatever was just played.
 const ChipSpec kChips[] = {
     {"All", GameViewT<GameEntry>::Filter::All, SystemId::Unknown},
+    {"Recent", GameViewT<GameEntry>::Filter::Recent, SystemId::Unknown},
     {"Favorites", GameViewT<GameEntry>::Filter::Favorites, SystemId::Unknown},
     {"NES", GameViewT<GameEntry>::Filter::System, SystemId::Nes},
     {"Game Boy", GameViewT<GameEntry>::Filter::System, SystemId::GameBoy},
@@ -69,6 +74,33 @@ const ChipSpec kChips[] = {
     {"PSP", GameViewT<GameEntry>::Filter::System, SystemId::Psp},
 };
 constexpr int kChipCount = static_cast<int>(sizeof(kChips) / sizeof(kChips[0]));
+
+// "Today 14:02", "Yesterday", "3 days ago", "12 Mar 2025". An absolute
+// timestamp is precise and unreadable; this is what a library wants.
+std::string describeWhen(long long unix_seconds) {
+    if (unix_seconds <= 0) return "Never";
+
+    const std::time_t when = static_cast<std::time_t>(unix_seconds);
+    const std::time_t now = std::time(nullptr);
+    const double age = std::difftime(now, when);
+    if (age < 0) return "Just now";
+
+    const std::tm* local = std::localtime(&when);
+    if (!local) return "Unknown";
+
+    char buffer[64] = {};
+    if (age < 60 * 60 * 12) {
+        std::strftime(buffer, sizeof(buffer), "Today %H:%M", local);
+        return buffer;
+    }
+    if (age < 60 * 60 * 36) return "Yesterday";
+    if (age < 60.0 * 60 * 24 * 14) {
+        const int days = static_cast<int>(age / (60 * 60 * 24));
+        return std::to_string(days) + " days ago";
+    }
+    std::strftime(buffer, sizeof(buffer), "%d %b %Y", local);
+    return buffer;
+}
 
 // A per-system tint, so the list reads at a glance.
 SDL_Color systemTint(SystemId system, const Theme& theme) {
@@ -131,13 +163,14 @@ Widgets buildWidgets(const LibraryLayout& l, const Metrics& m,
                      bool have_selection) {
     Widgets widgets;
 
-    widgets.header.reserve(5);
+    widgets.header.reserve(6);
     // The old menu drew only the PS2 button but still handled clicks on an
     // undrawn PS1 rect beside it, so installing a PS1 BIOS meant clicking
     // blank space. Both are real buttons now.
     appendRightToLeft(widgets.header, l.header, m, text,
-                      {{kIdSettings, "Settings"},
+                      {{kIdOverlay, "Settings"},
                        {kIdTheme, "Theme"},
+                       {kIdGallery, "Gallery"},
                        {kIdCores, "Install Cores"},
                        {kIdPs2Bios, "PS2 BIOS"},
                        {kIdPs1Bios, "PS1 BIOS"}},
@@ -346,10 +379,17 @@ void drawDetailPane(SDL_Renderer* renderer, Painter& painter, TextCache& text,
     // "Developer  " strings the old pane used, which only lined up in a
     // monospaced font it never had.
     const int label_w = m.px(86);
+    const std::string played = describeWhen(game->last_played);
+    const std::string plays = game->play_count > 0
+        ? std::to_string(game->play_count) +
+              (game->play_count == 1 ? " time" : " times")
+        : std::string("Never");
     const std::pair<const char*, const std::string*> fields[] = {
         {"Developer", &game->developer},
         {"Year", &game->year},
         {"Genre", &game->genre},
+        {"Last played", &played},
+        {"Played", &plays},
     };
 
     for (const auto& field : fields) {
@@ -375,8 +415,14 @@ void drawDetailPane(SDL_Renderer* renderer, Painter& painter, TextCache& text,
     painter.hline(x, y, width, m.border(), theme.border);
     y += m.px(12);
 
+    // The label plus at least two lines of body, or the section is not worth
+    // the space: adding the last-played rows above pushed the description far
+    // enough down that a one-line check left a heading and half a sentence
+    // sliced off by the clip rect.
     const int remaining = l.detail_body.y + l.detail_body.h - y;
-    if (remaining > text.lineHeight(FontRole::Body)) {
+    const int needed = text.lineHeight(FontRole::Small) + m.px(6) +
+                       text.lineHeight(FontRole::Body) * 2;
+    if (remaining >= needed) {
         text.draw(renderer, FontRole::Small, "DESCRIPTION", x, y,
                   theme.text_muted);
         y += text.lineHeight(FontRole::Small) + m.px(6);
@@ -479,6 +525,8 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
         input.open();
 
         ThemeScreen theme_screen;
+        GameOverlay settings_overlay;
+        GalleryScreen gallery;
 
         // One watcher owns the pad handle and keeps it in step with
         // hot-plugging. InputMap opens its own handle for navigation; SDL
@@ -489,6 +537,23 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
 
         GameViewT<GameEntry> view;
         view.setSource(&games);
+
+        // The library's overlay only shows the pages that mean anything with
+        // no game running; the rest are reached from the pause menu. The
+        // settings pointer being null is what disables the others, so an
+        // install with no settings object still gets a usable screen.
+        {
+            OverlayHooks overlay_hooks;
+            overlay_hooks.settings = actions.settings;
+            overlay_hooks.hotkeys = actions.hotkeys;
+            overlay_hooks.persistSettings = actions.persistSettings;
+            overlay_hooks.pad = [&pads] { return pads.state(); };
+            overlay_hooks.notify = [&toasts](std::string message,
+                                             Toast::Kind kind) {
+                toasts.push(std::move(message), kind, nowMs());
+            };
+            settings_overlay.setHooks(std::move(overlay_hooks));
+        }
 
         State state;
         std::string result;
@@ -680,8 +745,12 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
         // A widget press, from the mouse or from Enter on the focused button.
         const auto activate = [&](WidgetId id) {
             switch (id) {
-            case kIdSettings:
-                if (actions.openSettings) actions.openSettings();
+            case kIdOverlay:
+                settings_overlay.open(OverlayPage::Video);
+                dirty = true;
+                break;
+            case kIdGallery:
+                gallery.open(std::string());
                 dirty = true;
                 break;
             case kIdPs1Bios:
@@ -769,7 +838,7 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             case UiAction::PreviousTab:
                 applyChip((state.chip + kChipCount - 1) % kChipCount);
                 break;
-            case UiAction::Menu:     activate(kIdSettings); break;
+            case UiAction::Menu:     activate(kIdOverlay); break;
             case UiAction::None:
             default:
                 return;
@@ -806,6 +875,8 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             const bool animating = scrolling || state.search_active ||
                                    toasts.active(now_ms) ||
                                    theme_screen.isOpen() ||
+                                   settings_overlay.isOpen() ||
+                                   gallery.isOpen() ||
                                    (show_controller &&
                                     pads.state().connected) ||
                                    (actions.isScanning && actions.isScanning());
@@ -850,6 +921,42 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                     // An open overlay owns the keyboard and the mouse. The
                     // library behind it must not also act on the event, or a
                     // click meant for the dialog launches a game.
+                    // The overlays are checked before the theme editor and
+                    // before the library, so a click meant for one of them
+                    // cannot also launch a game behind it.
+                    if (settings_overlay.isOpen()) {
+                        if (settings_overlay.handleEvent(
+                                event, layout.window, metrics, scale)) {
+                            dirty = true;
+                        } else if ((event.type == SDL_KEYDOWN ||
+                                    event.type == SDL_CONTROLLERBUTTONDOWN) &&
+                                   settings_overlay.handleAction(
+                                       input.translate(&event))) {
+                            dirty = true;
+                        }
+                        if (event.type == SDL_QUIT) running = false;
+                        continue;
+                    }
+
+                    if (gallery.isOpen()) {
+                        if (gallery.handleEvent(event, layout.window, metrics,
+                                                scale)) {
+                            dirty = true;
+                        } else if ((event.type == SDL_KEYDOWN ||
+                                    event.type == SDL_CONTROLLERBUTTONDOWN) &&
+                                   gallery.handleAction(
+                                       input.translate(&event))) {
+                            dirty = true;
+                        }
+                        std::string deleted;
+                        if (gallery.consumeDeleted(deleted)) {
+                            toasts.push("Deleted " + deleted,
+                                        Toast::Kind::Info, now_ms);
+                        }
+                        if (event.type == SDL_QUIT) running = false;
+                        continue;
+                    }
+
                     if (theme_screen.isOpen()) {
                         if (theme_screen.handleEvent(event, layout.window,
                                                      metrics, scale)) {
@@ -1231,6 +1338,10 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             }
 
             theme_screen.draw(renderer, painter, text, metrics, layout.window);
+            settings_overlay.draw(renderer, painter, text, theme, metrics,
+                                  layout.window, now_ms);
+            gallery.draw(renderer, painter, text, theme, metrics,
+                         layout.window, artwork);
 
             toasts.draw(renderer, painter, text, theme, metrics, layout.window,
                         now_ms);

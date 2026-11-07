@@ -52,10 +52,14 @@ void drawController(SDL_Renderer* renderer, Painter& painter, TextCache& text,
                     SDL_GameControllerButton highlight,
                     std::uint64_t now_ms);
 
+// `port` stacks the read-outs upward from the bottom-right, so a two-pad core
+// shows both. Only port 0 was ever drawn, which made the second controller
+// unobservable.
 void drawInputDisplay(SDL_Renderer* renderer, Painter& painter,
                       TextCache& text, const Theme& theme,
                       const Metrics& metrics, const SDL_Rect& window,
-                      const ControllerSnapshot& state, Uint8 opacity);
+                      const ControllerSnapshot& state, Uint8 opacity,
+                      int port = 0);
 
 class ControllerWatcher {
 public:

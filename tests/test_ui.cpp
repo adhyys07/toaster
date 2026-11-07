@@ -1,5 +1,8 @@
 #define SDL_MAIN_HANDLED
+#include "hotkeys.h"
+#include "save_state_manager.h"
 #include "ui/controller_view.h"
+#include "ui/game_overlay.h"
 #include "ui/game_view.h"
 #include "ui/layout.h"
 #include "ui/text_cache.h"
@@ -24,6 +27,10 @@ void check(bool condition, const char* what) {
         std::printf("FAIL  %s\n", what);
         ++failures;
     }
+}
+
+void check(bool condition, const std::string& what) {
+    check(condition, what.c_str());
 }
 
 void checkEqual(int actual, int expected, const char* what) {
@@ -133,6 +140,9 @@ struct FakeGame {
     std::string title;
     std::string year = "Unknown";
     bool favorite = false;
+    // GameViewT reads this for the Recent filter and the LastPlayed sort, so
+    // the stand-in has to carry it too.
+    long long last_played = 0;
 };
 
 void testGameView() {
@@ -764,6 +774,211 @@ void testEllipsize() {
 
 } // namespace
 
+void testHotkeys() {
+    std::printf("hotkeys\n");
+    emu::frontend::Hotkeys keys;
+
+    // Every table entry must resolve to itself out of the box, or an action
+    // is in the enum with no default and is silently unreachable.
+    for (int i = 0; i < emu::frontend::kHotkeyCount; ++i) {
+        const emu::frontend::HotkeySpec& spec = emu::frontend::kHotkeys[i];
+        SDL_Keysym keysym{};
+        keysym.scancode = spec.default_key;
+        keysym.mod = 0;
+        if (spec.default_mod & emu::frontend::kModShift) {
+            keysym.mod |= KMOD_LSHIFT;
+        }
+        if (spec.default_mod & emu::frontend::kModCtrl) {
+            keysym.mod |= KMOD_LCTRL;
+        }
+        if (spec.default_mod & emu::frontend::kModAlt) {
+            keysym.mod |= KMOD_LALT;
+        }
+        check(keys.resolve(keysym) == spec.action,
+              std::string("default resolves: ") + spec.key);
+    }
+
+    // No two actions may share a combination in the defaults.
+    for (int i = 0; i < emu::frontend::kHotkeyCount; ++i) {
+        const emu::frontend::HotkeyAction action =
+            emu::frontend::kHotkeys[i].action;
+        const emu::frontend::HotkeyBinding& binding = keys.binding(action);
+        check(keys.conflict(binding.key, binding.mod, action) ==
+                  emu::frontend::HotkeyAction::None,
+              std::string("no default clash: ") +
+                  emu::frontend::kHotkeys[i].key);
+    }
+
+    // A modifierless binding must not fire when a modifier is held, or
+    // Shift+F10 would take a screenshot as well as open the gallery.
+    SDL_Keysym shifted{};
+    shifted.scancode = SDL_SCANCODE_F10;
+    shifted.mod = KMOD_RSHIFT;
+    check(keys.resolve(shifted) == emu::frontend::HotkeyAction::Gallery,
+          "Shift+F10 is the gallery, not a screenshot");
+
+    SDL_Keysym plain{};
+    plain.scancode = SDL_SCANCODE_F10;
+    plain.mod = 0;
+    check(keys.resolve(plain) == emu::frontend::HotkeyAction::Screenshot,
+          "plain F10 is still a screenshot");
+
+    // Right-hand modifiers and the lock keys must not change the match.
+    SDL_Keysym noisy{};
+    noisy.scancode = SDL_SCANCODE_R;
+    noisy.mod = KMOD_RCTRL | KMOD_NUM | KMOD_CAPS;
+    check(keys.resolve(noisy) == emu::frontend::HotkeyAction::Reset,
+          "Num Lock does not break Ctrl+R");
+
+    // An unbound action must not match an unbound key press.
+    keys.unbind(emu::frontend::HotkeyAction::DebugInfo);
+    SDL_Keysym unknown{};
+    unknown.scancode = SDL_SCANCODE_UNKNOWN;
+    unknown.mod = 0;
+    check(keys.resolve(unknown) == emu::frontend::HotkeyAction::None,
+          "an unknown scancode resolves to nothing");
+
+    // A clash is reported rather than silently stealing the combination.
+    check(keys.conflict(SDL_SCANCODE_F1, emu::frontend::kModNone,
+                        emu::frontend::HotkeyAction::Screenshot) ==
+              emu::frontend::HotkeyAction::PauseMenu,
+          "F1 is reported as taken by the pause menu");
+
+    // Round-trip through the file.
+    keys.bind(emu::frontend::HotkeyAction::Screenshot, SDL_SCANCODE_F7,
+              emu::frontend::kModCtrl | emu::frontend::kModShift);
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() / "toaster-hotkeys-test.ini";
+    std::string error;
+    check(keys.save(file, error), "hotkeys save");
+
+    emu::frontend::Hotkeys reloaded;
+    check(reloaded.load(file, error), "hotkeys load");
+    const emu::frontend::HotkeyBinding& round =
+        reloaded.binding(emu::frontend::HotkeyAction::Screenshot);
+    check(round.key == SDL_SCANCODE_F7, "scancode survived the round trip");
+    check(round.mod == (emu::frontend::kModCtrl | emu::frontend::kModShift),
+          "modifiers survived the round trip");
+    check(!reloaded.binding(emu::frontend::HotkeyAction::DebugInfo).bound(),
+          "an unbound action stays unbound across a round trip");
+
+    checkEqual(emu::frontend::describeHotkey(round), "Ctrl+Shift+F7",
+               "describeHotkey");
+
+    std::error_code ignored;
+    std::filesystem::remove(file, ignored);
+}
+
+void testRecentView() {
+    std::printf("recent view\n");
+    std::vector<FakeGame> games(3);
+    games[0].title = "Alpha";
+    games[0].path = "alpha.nes";
+    games[0].last_played = 0;
+    games[1].title = "Bravo";
+    games[1].path = "bravo.nes";
+    games[1].last_played = 1000;
+    games[2].title = "Charlie";
+    games[2].path = "charlie.nes";
+    games[2].last_played = 2000;
+
+    emu::frontend::ui::GameViewT<FakeGame> view;
+    view.setSource(&games);
+    view.setFilter(emu::frontend::ui::GameViewT<FakeGame>::Filter::Recent);
+    view.refresh();
+
+    // Recent was in the enum and ignored by refresh(), so it fell through to
+    // All and showed everything, never-played games included.
+    checkEqual(static_cast<int>(view.size()), 2,
+               "never-played games are filtered out");
+    if (view.size() == 2) {
+        checkEqual(view.at(0).title, "Charlie", "newest first");
+        checkEqual(view.at(1).title, "Bravo", "then the next newest");
+    }
+
+    // A zero timestamp must not sort to the front under LastPlayed.
+    view.setFilter(emu::frontend::ui::GameViewT<FakeGame>::Filter::All);
+    view.setSort(emu::frontend::ui::GameViewT<FakeGame>::Sort::LastPlayed);
+    view.refresh();
+    checkEqual(static_cast<int>(view.size()), 3, "All still shows everything");
+    if (view.size() == 3) {
+        checkEqual(view.at(2).title, "Alpha", "never-played sorts last");
+    }
+}
+
+void testOverlayGeometry() {
+    std::printf("overlay geometry\n");
+    using emu::frontend::ui::Metrics;
+    using emu::frontend::ui::overlayBodyRect;
+    using emu::frontend::ui::overlayPanelRect;
+    using emu::frontend::ui::overlaySlotRect;
+    using emu::frontend::ui::overlayTabsRect;
+
+    const auto contains = [](const SDL_Rect& outer, const SDL_Rect& inner) {
+        return inner.x >= outer.x && inner.y >= outer.y &&
+               inner.x + inner.w <= outer.x + outer.w &&
+               inner.y + inner.h <= outer.y + outer.h;
+    };
+    const auto overlaps = [](const SDL_Rect& a, const SDL_Rect& b) {
+        return a.x < b.x + b.w && b.x < a.x + a.w &&
+               a.y < b.y + b.h && b.y < a.y + a.h;
+    };
+
+    // Three window sizes and two scales: the slot grid mixes a width-derived
+    // cell width with a height-derived text block, which is the same unit
+    // confusion that put the controller diagram's triggers outside its rect.
+    const SDL_Rect windows[] = {
+        {0, 0, 1280, 720}, {0, 0, 960, 540}, {0, 0, 2560, 1440}};
+    const float scales[] = {1.0f, 2.0f};
+
+    for (const SDL_Rect& window : windows) {
+        for (const float scale : scales) {
+            Metrics m;
+            m.scale = scale;
+
+            const SDL_Rect panel = overlayPanelRect(window, m);
+            const SDL_Rect tabs = overlayTabsRect(panel, m);
+            const SDL_Rect body = overlayBodyRect(panel, m);
+
+            check(contains(window, panel), "the panel is inside the window");
+            check(contains(panel, tabs), "the tab strip is inside the panel");
+            check(contains(panel, body), "the body is inside the panel");
+            check(!overlaps(tabs, body), "the tabs and the body do not overlap");
+            check(body.w > 0 && body.h > 0, "the body has positive area");
+
+            SDL_Rect cells[emu::frontend::SaveStateManager::kSlotCount];
+            for (int slot = 0;
+                 slot < emu::frontend::SaveStateManager::kSlotCount; ++slot) {
+                cells[slot] = overlaySlotRect(body, m, slot);
+                check(cells[slot].w > 0 && cells[slot].h > 0,
+                      "a slot cell has positive area");
+                check(cells[slot].x >= body.x &&
+                          cells[slot].x + cells[slot].w <= body.x + body.w,
+                      "a slot cell stays within the body horizontally");
+            }
+
+            // No two cells may touch: the grid is drawn without clipping
+            // between cells, so an overlap would paint one thumbnail over
+            // another and is invisible until it is on screen.
+            for (int a = 0; a < emu::frontend::SaveStateManager::kSlotCount;
+                 ++a) {
+                for (int b = a + 1;
+                     b < emu::frontend::SaveStateManager::kSlotCount; ++b) {
+                    check(!overlaps(cells[a], cells[b]),
+                          "slot cells " + std::to_string(a) + " and " +
+                              std::to_string(b) + " do not overlap");
+                }
+            }
+
+            // Slot 5 starts the second row, so it must sit below slot 0 and
+            // share its column.
+            checkEqual(cells[5].x, cells[0].x,
+                       "slot 5 is under slot 0");
+            check(cells[5].y > cells[0].y, "the second row is below the first");
+        }
+    }
+}
+
 int main() {
     testFuzzyMatch();
     testFoldCase();
@@ -778,6 +993,9 @@ int main() {
     testThemeFile();
     testControllerLayout();
     testSnapshot();
+    testHotkeys();
+    testRecentView();
+    testOverlayGeometry();
 
 
     if (failures == 0) {

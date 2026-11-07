@@ -132,11 +132,14 @@ add_executable(emu
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
     systems/ps1/ps1_system.cpp
-    src/frontend/pause_menu.cpp
     src/frontend/ui/theme.cpp
     src/frontend/ui/theme_io.cpp
     src/frontend/ui/theme_screen.cpp
-    src/frontend/ui/controller_view.cpp)
+    src/frontend/ui/controller_view.cpp
+    src/frontend/ui/game_overlay.cpp
+    src/frontend/ui/gallery.cpp
+    src/frontend/gl_overlay.cpp
+    src/frontend/hotkeys.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 
@@ -255,6 +258,8 @@ endif()
 # ui_tests has to come after SDL2_ttf is found, because it links it: the
 # filtering, fuzzy search, layout arithmetic and ellipsizing are all pure
 # logic with no window, but measuring text still needs TTF.
+# gl_overlay.cpp and gallery.cpp stay out: the first needs a live GL context
+# and the second needs SDL_image, neither of which a headless test has.
 add_executable(ui_tests
     tests/test_ui.cpp
     src/frontend/ui/game_view.cpp
@@ -264,7 +269,15 @@ add_executable(ui_tests
     src/frontend/ui/theme_io.cpp
     src/frontend/ui/controller_view.cpp
     src/frontend/ui/painter.cpp
+    src/frontend/ui/widgets.cpp
+    src/frontend/ui/input_map.cpp
+    src/frontend/ui/game_overlay.cpp
+    src/frontend/cheat_list.cpp
+    src/frontend/hotkeys.cpp
+    src/frontend/settings.cpp
+    src/frontend/save_state_manager.cpp
     src/frontend/ui_font.cpp)
+target_include_directories(ui_tests PRIVATE systems/psp)
 target_include_directories(ui_tests PRIVATE src/frontend)
 
 if(TARGET SDL2::SDL2)

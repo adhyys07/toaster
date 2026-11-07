@@ -2,15 +2,25 @@
 
 #include "core/system.h"
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 namespace emu::frontend {
 
-// Writes the frame to screenshots/<game>-<timestamp>-<n>.png beside the
-// executable. Returns the path written, or an empty string on failure with
-// `error` filled in.
+std::filesystem::path screenshotsDirectory();
+
+bool savePngTo(const VideoFrame& frame,
+               const std::filesystem::path& path,
+               std::string& error);
+
 std::string saveScreenshot(const VideoFrame& frame,
                            const std::string& game_path,
                            std::string& error);
+
+std::vector<std::filesystem::path> listScreenshots(
+    const std::string& game_path);
+
+std::vector<std::filesystem::path> listAllScreenshots();
 
 } // namespace emu::frontend

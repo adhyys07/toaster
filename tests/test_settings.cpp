@@ -26,6 +26,11 @@ int main() {
 
     std::printf("per-game settings\n");
 
+    // Every key is marked present, which is what a caller that really does
+    // want to override all seven does. saveGameSettings only writes the keys
+    // whose present flag is set - it used to write all seven unconditionally,
+    // so overriding one pinned the other six to whatever the globals happened
+    // to be at the time.
     emu::frontend::GameSettings settings;
     settings.scale = 4;
     settings.integer_scale = false;
@@ -34,6 +39,13 @@ int main() {
     settings.show_fps = true;
     settings.mute_audio = true;
     settings.fast_forward_speed = 3;
+    settings.present.scale = true;
+    settings.present.integer_scale = true;
+    settings.present.bilinear_filter = true;
+    settings.present.vsync = true;
+    settings.present.show_fps = true;
+    settings.present.mute_audio = true;
+    settings.present.fast_forward_speed = true;
 
     check(emu::frontend::saveGameSettings(game, settings),
           "settings are written");
@@ -48,12 +60,41 @@ int main() {
     check(loaded.mute_audio, "mute_audio round-trips");
     check(loaded.fast_forward_speed == 3, "fast_forward_speed round-trips");
 
-    // saveGameSettings writes every key, so everything reads back as present.
     check(loaded.present.scale && loaded.present.integer_scale &&
               loaded.present.bilinear_filter && loaded.present.vsync &&
               loaded.present.show_fps && loaded.present.mute_audio &&
               loaded.present.fast_forward_speed,
           "a full file marks every key present");
+
+    // One override must write one key. The overlay's "This game" page can set
+    // a single flag, and pinning the other six would be a silent global
+    // settings reset on the next launch.
+    {
+        emu::frontend::GameSettings single;
+        single.show_fps = true;
+        single.present.show_fps = true;
+        check(emu::frontend::saveGameSettings(game, single),
+              "a single override is written");
+
+        const auto one = emu::frontend::loadGameSettings(game);
+        check(one.present.show_fps && one.show_fps,
+              "the override round-trips");
+        check(!one.present.vsync && !one.present.scale &&
+                  !one.present.mute_audio && !one.present.integer_scale &&
+                  !one.present.bilinear_filter &&
+                  !one.present.fast_forward_speed,
+              "the other six keys are not pinned");
+    }
+
+    // Clearing every override removes the file rather than leaving an empty
+    // one behind, so "use the global settings" leaves no trace.
+    {
+        const emu::frontend::GameSettings none;
+        check(emu::frontend::saveGameSettings(game, none),
+              "clearing every override succeeds");
+        check(!std::filesystem::exists(settings_file),
+              "an override-free file is deleted");
+    }
 
     // A file that overrides one key must not claim the others: the frontend
     // uses these flags to decide what may override the global settings.

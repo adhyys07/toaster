@@ -21,7 +21,7 @@ template <typename Entry>
 class GameViewT {
 public:
     enum class Filter { All, Favorites, Recent, System };
-    enum class Sort { Title, Year, System };
+    enum class Sort { Title, Year, System, LastPlayed };
 
     void setSource(const std::vector<Entry>* games) {
         games_ = games;
@@ -98,6 +98,16 @@ const std::string& GameViewT<Entry>::foldedTitle(std::size_t index) const {
 template <typename Entry>
 bool GameViewT<Entry>::lessBySort(const Entry& a, const Entry& b) const {
     switch (sort_) {
+    case Sort::LastPlayed:
+        // Never-played sorts last rather than first: a 0 timestamp compared
+        // as a number would otherwise put untouched games at the top of
+        // "recent", which is the opposite of the point.
+        if (a.last_played != b.last_played) {
+            if (a.last_played == 0) return false;
+            if (b.last_played == 0) return true;
+            return a.last_played > b.last_played;
+        }
+        break;
     case Sort::Year:
         if (a.year != b.year) return a.year > b.year;
         break;
@@ -126,6 +136,9 @@ bool GameViewT<Entry>::refresh() {
         const Entry& game = (*games_)[i];
 
         if (filter_ == Filter::Favorites && !game.favorite) continue;
+        // Recent was in the enum and ignored here, so selecting it showed
+        // the whole library.
+        if (filter_ == Filter::Recent && game.last_played == 0) continue;
         if (filter_ == Filter::System &&
             systemFromPath(game.path.string()) != system_) {
             continue;
@@ -140,11 +153,16 @@ bool GameViewT<Entry>::refresh() {
     }
 
     if (query_folded_.empty()) {
+        // Recent is a sort as much as a filter: ordering it by title would
+        // bury whatever was just played.
+        const Sort saved = sort_;
+        if (filter_ == Filter::Recent) sort_ = Sort::LastPlayed;
         std::sort(scored.begin(), scored.end(),
                   [this](const auto& left, const auto& right) {
                       return lessBySort((*games_)[left.second],
                                         (*games_)[right.second]);
                   });
+        sort_ = saved;
     } else {
         std::stable_sort(scored.begin(), scored.end(),
                          [](const auto& left, const auto& right) {

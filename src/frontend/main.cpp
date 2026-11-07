@@ -23,7 +23,6 @@
 #include "gl_fsr_upscaler.h"
 #include "ui_font.h"
 #include "rewind_buffer.h"
-#include "pause_menu.h"
 #include "gl_crt_shader.h"
 #include <array>
 #include "settings.h"
@@ -40,7 +39,11 @@
 #include "sha256.h"
 #include "save_state_manager.h"
 #include "game_entry.h"
+#include "gl_overlay.h"
+#include "hotkeys.h"
 #include "ui/controller_view.h"
+#include "ui/gallery.h"
+#include "ui/game_overlay.h"
 #include "ui/layout.h"
 #include "ui/library_screen.h"
 #include "ui/theme_io.h"
@@ -70,13 +73,18 @@ void printUsage(const char* exe) {
         "  --system-dir PATH   system assets/BIOS root (default: system)\n"
         "  --fullscreen        start in fullscreen mode\n"
         "  --mute              mute audio\n"
+        "  --resume            continue from the auto-save left by the\n"
+        "                      last clean exit of this game\n"
+        "  --input-display     show a live controller read-out over the game\n"
         "  --verbose           enable diagnostic logging\n"
         "  --help\n"
         "\n"
         "Without a ROM argument, open the game library. O opens a game file.\n"
         "F11 toggles fullscreen; Esc quits during gameplay.\n"
-        "F1 opens the pause menu. Shift+F1-F9 save a state, Ctrl+1-9 load\n"
-        "one, and holding Backspace rewinds on cores with save states.\n",
+        "F1 opens the pause menu and F3 the save-state grid. Shift+F1-F9\n"
+        "save a state and Ctrl+1-9 load one; holding Backspace rewinds on\n"
+        "cores with save states. Every hotkey is listed and rebindable on\n"
+        "the pause menu's Keyboard page.\n",
         exe);
 }
 
@@ -90,6 +98,70 @@ std::string gamePathKey(const fs::path& path) {
     // Same normalization the library service matching uses, so favorites.txt
     // keys and remote lookups can never disagree about what a path means.
     return emu::frontend::libraryPathKey(path);
+}
+
+// Where the hotkey bindings live: one file beside the executable, shared by
+// the library screen and the game loop, so rebinding in one is visible in the
+// other without a restart.
+fs::path hotkeyFile() {
+    char* raw = SDL_GetBasePath();
+    const fs::path base = raw ? fs::path(raw) : fs::current_path();
+    if (raw) SDL_free(raw);
+    return base / "hotkeys.ini";
+}
+
+// Last-played times for installs with no library service. The service keeps
+// these in RemoteGame; locally they go in recent.ini as
+// "<path>|<unix seconds>|<play count>". Favourites already work this way.
+struct PlayRecord {
+    long long last_played = 0;
+    int play_count = 0;
+};
+
+fs::path playHistoryFile() {
+    char* raw = SDL_GetBasePath();
+    const fs::path base = raw ? fs::path(raw) : fs::current_path();
+    if (raw) SDL_free(raw);
+    return base / "recent.ini";
+}
+
+std::map<std::string, PlayRecord> loadPlayHistory() {
+    std::map<std::string, PlayRecord> out;
+    std::ifstream input(playHistoryFile());
+    if (!input) return out;
+
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        // Split from the right: a Windows path contains colons, spaces and
+        // backslashes, but the two trailing fields are always the numbers
+        // after the last two bars.
+        const auto last = line.rfind('|');
+        if (last == std::string::npos || last == 0) continue;
+        const auto first = line.rfind('|', last - 1);
+        if (first == std::string::npos) continue;
+
+        PlayRecord record;
+        try {
+            record.play_count = std::stoi(line.substr(last + 1));
+            record.last_played =
+                std::stoll(line.substr(first + 1, last - first - 1));
+        } catch (const std::exception&) {
+            continue;
+        }
+        out[line.substr(0, first)] = record;
+    }
+    return out;
+}
+
+bool savePlayHistory(const std::map<std::string, PlayRecord>& history) {
+    std::ofstream output(playHistoryFile(), std::ios::trunc);
+    if (!output) return false;
+    for (const auto& entry : history) {
+        output << entry.first << '|' << entry.second.last_played << '|'
+               << entry.second.play_count << '\n';
+    }
+    return output.good();
 }
 
 std::set<std::string> loadFavorites() {
@@ -202,335 +274,43 @@ void showDebugInfo(const emu::System& system) {
         nullptr);
 }
 
-void drawMenuText(SDL_Renderer* renderer, TTF_Font* font,
-                  const std::string& text, int x, int y,
-                  SDL_Color color, int wrap_width = 0) {
-    SDL_Surface* surface = wrap_width > 0
-        ? TTF_RenderUTF8_Blended_Wrapped(
-              font, text.c_str(), color, static_cast<Uint32>(wrap_width))
-        : TTF_RenderUTF8_Blended(font, text.c_str(), color);
+// The settings, controller-binding and cheat screens used to open their own
+// SDL_Window with their own renderer and their own hand-rolled rounded rects.
+// They are pages of ui::GameOverlay now, which is why drawMenuText,
+// drawMenuPanel, drawMenuButton, fillRoundedRect, showSettingsMenu and
+// showControllerSettingsMenu are gone: nothing outside those windows used
+// them.
 
-    if (!surface) return;
-
-    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-    if (texture) {
-        SDL_Rect destination{x, y, surface->w, surface->h};
-        SDL_RenderCopy(renderer, texture, nullptr, &destination);
-        SDL_DestroyTexture(texture);
-    }
-    SDL_FreeSurface(surface);
-}
-
-void fillRoundedRect(SDL_Renderer* renderer, const SDL_Rect& rect,
-                     int radius, SDL_Color color) {
-    radius = std::max(0, std::min(radius, std::min(rect.w / 2, rect.h / 2)));
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-
-    for (int y = 0; y < rect.h; ++y) {
-        const int edge_distance = std::min(y, rect.h - 1 - y);
-        int inset = 0;
-
-        if (edge_distance < radius) {
-            const double dy = radius - edge_distance;
-            inset = radius - static_cast<int>(
-                std::sqrt(radius * radius - dy * dy));
-        }
-
-        SDL_RenderDrawLine(renderer,
-                           rect.x + inset, rect.y + y,
-                           rect.x + rect.w - 1 - inset, rect.y + y);
-    }
-}
-
-void drawMenuPanel(SDL_Renderer* renderer, const SDL_Rect& rect,
-                   SDL_Color fill, SDL_Color border, SDL_Color accent) {
-    SDL_SetRenderDrawColor(renderer, fill.r, fill.g, fill.b, fill.a);
-    SDL_RenderFillRect(renderer, &rect);
-
-    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
-    SDL_RenderDrawRect(renderer, &rect);
-
-    SDL_Rect accent_bar{rect.x, rect.y, 4, rect.h};
-    SDL_SetRenderDrawColor(renderer, accent.r, accent.g, accent.b, accent.a);
-    SDL_RenderFillRect(renderer, &accent_bar);
-}
-
-bool pointInside(const SDL_Rect& rect, int x, int y) {
-    return x >= rect.x && x < rect.x + rect.w &&
-           y >= rect.y && y < rect.y + rect.h;
-}
-
-void drawMenuButton(SDL_Renderer* renderer, TTF_Font* font,
-                    const SDL_Rect& rect, const std::string& label,
-                    int mouse_x, int mouse_y) {
-    const bool hover = pointInside(rect, mouse_x, mouse_y);
-
-    const SDL_Color fill = hover
-        ? SDL_Color{65, 119, 151, 255}
-        : SDL_Color{39, 51, 69, 255};
-    const SDL_Color border = hover
-        ? SDL_Color{111, 190, 226, 255}
-        : SDL_Color{69, 85, 106, 255};
-
-    fillRoundedRect(renderer, rect, 9, fill);
-    SDL_SetRenderDrawColor(renderer, border.r, border.g, border.b, border.a);
-    SDL_RenderDrawRect(renderer, &rect);
-
-    int text_width = 0;
-    int text_height = 0;
-    TTF_SizeUTF8(font, label.c_str(), &text_width, &text_height);
-
-    const SDL_Color text_color{242, 246, 252, 255};
-    drawMenuText(renderer, font, label,
-                 rect.x + (rect.w - text_width) / 2,
-                 rect.y + (rect.h - text_height) / 2,
-                 text_color);
-}
-
-void showControllerSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font){
-    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Controller settings",
-                                 SDL_GetError(), nullptr);
-        return;
-    }
-    SDL_GameControllerEventState(SDL_ENABLE);
-    
-    const char* names[emu::frontend::kPadActionCount] = {
-        "Cross", "Circle", "Square", "Triangle",
-        "Start", "Select", "Up", "Down", "Left", "Right", "L1", "R1"
-    };
-    
-    SDL_Window* window = SDL_CreateWindow(
-        "Controller Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        620, 560, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-    if (!window) return;
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    if (!renderer) {
-        SDL_DestroyWindow(window);
-        return;
-    }
-
-    int waiting_for = -1;
-    bool running = true;
-
-    while (running) {
-        SDL_SetRenderDrawColor(renderer, 17, 22, 28, 255);
-        SDL_RenderClear(renderer);
-        drawMenuText(renderer, font, "CONTROLLER BUTTONS", 28, 20,
-                     SDL_Color{233, 216, 166, 255});
-        for (int i = 0; i < emu::frontend::kPadActionCount; ++i) {
-            const int y = 68 + i * 36;
-            const auto button = static_cast<SDL_GameControllerButton>(
-                settings.pad_buttons[i]);
-            const char* button_name = SDL_GameControllerGetStringForButton(button);
-
-            drawMenuText(renderer, font, names[i], 38, y,
-                         SDL_Color{235, 238, 240, 255});
-
-            const std::string label = waiting_for == i
-                ? "Press a controller button..."
-                : (button_name ? button_name : "Unassigned");
-            
-            drawMenuText(renderer, font, label, 300, y,
-                         SDL_Color{233, 216, 166, 255});
-            const SDL_Scancode key = static_cast<SDL_Scancode>(
-                settings.keyboard_keys[i]);
-            drawMenuText(renderer, font,
-                         SDL_GetScancodeName(key), 470, y,
-                         SDL_Color{160, 170, 180, 255});
-        }
-
-        drawMenuText(renderer, font, "Click a row, then press a controller button. Esc closes.",
-                     28, 518, SDL_Color{160, 170, 180, 255});
-        SDL_RenderPresent(renderer);
-
-        SDL_Event event;
-        if (!SDL_WaitEvent(&event)) continue;
-
-        if (event.type == SDL_QUIT) {
-            running = false;
-        } else if (event.type == SDL_KEYDOWN &&
-                   event.key.keysym.sym == SDLK_ESCAPE) {
-            running = false;
-        } else if (event.type == SDL_MOUSEBUTTONDOWN &&
-                   event.button.button == SDL_BUTTON_LEFT) {
-            const int row = (event.button.y - 68) / 36;
-            if (event.button.y >= 68 && row >= 0 &&
-                row < emu::frontend::kPadActionCount) {
-                waiting_for = row;
-            }
-        } else if (event.type == SDL_KEYDOWN && waiting_for >= 0 &&
-                   event.key.keysym.sym != SDLK_ESCAPE) {
-            settings.keyboard_keys[waiting_for] = event.key.keysym.scancode;
-            waiting_for = -1;
-            emu::frontend::saveSettings(settings);
-        } else if (event.type == SDL_CONTROLLERBUTTONDOWN && waiting_for >= 0) {
-            settings.pad_buttons[waiting_for] = event.cbutton.button;
-            waiting_for = -1;
-            emu::frontend::saveSettings(settings);
-        }
-    }
-
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
-}
-
-bool showSettingsMenu(emu::frontend::Settings& settings, TTF_Font* font) {
-    SDL_Window* window = SDL_CreateWindow(
-        "Settings", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        760, 760, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-    if (!window) return false;
-
-    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    if (!renderer) renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_SOFTWARE);
-    if (!renderer) {
-        SDL_DestroyWindow(window);
-        return false;
-    }
-
-    const emu::frontend::Settings original = settings;
-    const SDL_Rect mute_button{410, 90, 270, 44};
-    const SDL_Rect fullscreen_button{410, 145, 270, 44};
-    const SDL_Rect upscaler_button{410, 200, 270, 44};
-    const SDL_Rect sharpness_down{410, 255, 52, 44};
-    const SDL_Rect sharpness_up{628, 255, 52, 44};
-    const SDL_Rect fps_button{410, 310, 270, 44};
-    const SDL_Rect scaling_button{410, 365, 270, 44};
-    const SDL_Rect save_button{410, 685, 125, 44};
-    const SDL_Rect cancel_button{555, 685, 125, 44};
-    const SDL_Rect controller_button{60, 685, 250, 44};
-    
-    
-
-    bool running = true;
-    bool saved = false;
-    bool redraw = true;
-    while (running) {
-        if (redraw) {
-            int mouse_x = 0;
-            int mouse_y = 0;
-            SDL_GetMouseState(&mouse_x, &mouse_y);
-            SDL_SetRenderDrawColor(renderer, 17, 22, 28, 255);
-            SDL_RenderClear(renderer);
-
-            const SDL_Color gold{233, 216, 166, 255};
-            const SDL_Color white{235, 238, 240, 255};
-            const SDL_Color muted{160, 170, 180, 255};
-            drawMenuText(renderer, font, "SETTINGS", 36, 24, gold);
-            drawMenuText(renderer, font, "Mute audio", 60, 98, white);
-            drawMenuText(renderer, font, "Start fullscreen", 60, 153, white);
-            drawMenuText(renderer, font, "Upscaling filter", 60, 208, white);
-            drawMenuText(renderer, font, "FSR sharpness", 60, 263, white);
-            drawMenuText(renderer, font, "Show FPS in title", 60, 318, white);
-            drawMenuText(renderer, font, "Screen scaling", 60, 373, white);
-            drawMenuButton(renderer, font, fps_button,
-               settings.show_fps ? "On" : "Off", mouse_x, mouse_y);
-
-            drawMenuButton(renderer, font, mute_button,
-                           settings.mute ? "On" : "Off", mouse_x, mouse_y);
-            drawMenuButton(renderer, font, fullscreen_button,
-                           settings.fullscreen ? "On" : "Off", mouse_x, mouse_y);
-            drawMenuButton(renderer, font, upscaler_button,
-                           emu::frontend::upscalerName(settings.upscaler),
-                           mouse_x, mouse_y);
-            drawMenuButton(renderer, font, scaling_button,
-                           emu::frontend::scalingName(settings.scaling),
-                           mouse_x, mouse_y);
-            drawMenuButton(renderer, font, sharpness_down, "-", mouse_x, mouse_y);
-            drawMenuButton(renderer, font, sharpness_up, "+", mouse_x, mouse_y);
-            drawMenuButton(renderer, font, controller_button,
-                           "Configure Controller", mouse_x, mouse_y);
-
-            char sharpness_text[32];
-            std::snprintf(sharpness_text, sizeof(sharpness_text), "%.2f",
-                          settings.sharpness);
-            drawMenuText(renderer, font, sharpness_text, 515, 267, white);
-            drawMenuText(renderer, font, "Nearest and Linear use SDL scaling.",
-                         36, 480, muted);
-            drawMenuText(renderer, font, "FSR 1 uses OpenGL EASU + RCAS passes.",
-                         36, 512, muted);
-            drawMenuText(renderer, font, "NES mappers 0-4 and 7. Game Boy: MBC1, MBC2, MBC3 and MBC5, no Color.",
-                         36, 544, muted, 680);
-            drawMenuText(renderer, font, "PICO-8 still requires a separate compatible core.",
-                         36, 592, muted, 680);
-            drawMenuButton(renderer, font, save_button, "Save", mouse_x, mouse_y);
-            drawMenuButton(renderer, font, cancel_button, "Cancel", mouse_x, mouse_y);
-            SDL_RenderPresent(renderer);
-            redraw = false;
-        }
-
-        SDL_Event event;
-        if (!SDL_WaitEvent(&event)) continue;
-        if (event.type == SDL_QUIT) {
-            settings = original;
-            running = false;
-        } else if (event.type == SDL_MOUSEMOTION) {
-            redraw = true;
-        } else if (event.type == SDL_KEYDOWN) {
-            if (event.key.keysym.sym == SDLK_ESCAPE) {
-                settings = original;
-                running = false;
-            } else if (event.key.keysym.sym == SDLK_RETURN ||
-                       event.key.keysym.sym == SDLK_KP_ENTER) {
-                saved = emu::frontend::saveSettings(settings);
-                running = false;
-            }
-        } else if (event.type == SDL_MOUSEBUTTONDOWN &&
-                   event.button.button == SDL_BUTTON_LEFT) {
-            if (pointInside(mute_button, event.button.x, event.button.y)) {
-                settings.mute = !settings.mute;
-                redraw = true;
-            } else if (pointInside(fullscreen_button, event.button.x, event.button.y)) {
-                settings.fullscreen = !settings.fullscreen;
-                redraw = true;
-            } else if (pointInside(upscaler_button, event.button.x, event.button.y)) {
-                emu::frontend::cycleUpscaler(settings);
-                redraw = true;
-            } else if (pointInside(sharpness_down, event.button.x, event.button.y)) {
-                settings.sharpness = std::max(0.0f, settings.sharpness - 0.05f);
-                redraw = true;
-            } else if (pointInside(sharpness_up, event.button.x, event.button.y)) {
-                settings.sharpness = std::min(1.0f, settings.sharpness + 0.05f);
-                redraw = true;
-            } else if (pointInside(save_button, event.button.x, event.button.y)) {
-                saved = emu::frontend::saveSettings(settings);
-                running = false;
-            } else if (pointInside(cancel_button, event.button.x, event.button.y)) {
-                settings = original;
-                running = false;
-            } else if (pointInside(controller_button, event.button.x, event.button.y)) {
-                showControllerSettingsMenu(settings, font);
-                redraw = true;
-            } else if (pointInside(fps_button, event.button.x, event.button.y)) {
-                settings.show_fps = !settings.show_fps;
-                redraw = true;
-            } else if (pointInside(scaling_button, event.button.x, event.button.y)) {
-                emu::frontend::cycleScaling(settings);
-                redraw = true;
-            }
-        }
-    }
-
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
-    return saved;
-}
 std::string chooseRomFile();
+// Defined below runGenericGame, but the library screen's resume hook needs
+// it, and that is built first.
+emu::frontend::SaveStateManager& saveStateManager();
 bool importBios(emu::frontend::BiosSystem target,
                 const std::string& system_directory);
 bool installCoreFiles(const std::string& server_url, bool verify);
 
 std::string showGameMenu(const fs::path& folder,
                          emu::frontend::Settings& settings,
+                         emu::frontend::Hotkeys& hotkeys,
                          const std::string& system_directory,
                          const std::string& core_server_url,
                          bool core_server_verify,
                          const std::string& library_server_url) {
     auto games = scanGames(folder);
     std::unique_ptr<emu::frontend::GameLibrary> library;
+
+    // Applied to the local scan only: the service's own rows already carry
+    // these and adoptLibraryGames copies them over.
+    std::map<std::string, PlayRecord> history = loadPlayHistory();
+    const auto applyHistory = [&] {
+        for (GameEntry& game : games) {
+            const auto found = history.find(gamePathKey(game.path));
+            if (found == history.end()) continue;
+            game.last_played = found->second.last_played;
+            game.play_count = found->second.play_count;
+        }
+    };
+    applyHistory();
 
     // Copies the service's cached rows into the list the menu draws. Every
     // refresh goes through here so artwork and tags cannot end up populated
@@ -545,6 +325,10 @@ std::string showGameMenu(const fs::path& folder,
             game.favorite = remote.favorite;
             game.artwork = remote.artwork;
             game.tags = remote.tags;
+            // RemoteGame has carried these since the service was written and
+            // nothing read them, which is why there was no Recent chip.
+            game.last_played = remote.last_played;
+            game.play_count = remote.play_count;
             games.push_back(std::move(game));
         }
     };
@@ -576,6 +360,7 @@ std::string showGameMenu(const fs::path& folder,
     const auto rescanGames = [&] {
         if (!library) {
             games = scanGames(folder);
+            applyHistory();
             return;
         }
         if (scanning) return;   // one at a time
@@ -612,6 +397,24 @@ std::string showGameMenu(const fs::path& folder,
     // than surfaced: the game is already starting and there is nothing the
     // user can do about it.
     const auto markPlayed = [&](const std::string& path) {
+        const std::string played_key = gamePathKey(fs::path(path));
+        const long long played_at = static_cast<long long>(std::time(nullptr));
+
+        PlayRecord& record = history[played_key];
+        record.last_played = played_at;
+        ++record.play_count;
+        if (!savePlayHistory(history)) {
+            std::fprintf(stderr, "Could not update recent.ini\n");
+        }
+
+        // Keep the on-screen row in step without waiting for a rescan.
+        for (GameEntry& game : games) {
+            if (gamePathKey(game.path) != played_key) continue;
+            game.last_played = played_at;
+            ++game.play_count;
+            break;
+        }
+
         if (!library || scanning) return;
         const emu::frontend::RemoteGame* remote = library->find(path);
         if (!remote) return;
@@ -665,22 +468,6 @@ std::string showGameMenu(const fs::path& folder,
         return saveFavorites(games);
     };
 
-    // TTF and this font stay up for the settings and controller windows,
-    // which still create their own window. The library screen opens its own
-    // TextCache and does not use either.
-    if (TTF_Init() != 0) {
-        std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
-        return {};
-    }
-
-    std::string font_error;
-    TTF_Font* font = emu::frontend::openUiFont(20, font_error);
-    if (!font) {
-        std::fprintf(stderr, "%s\n", font_error.c_str());
-        TTF_Quit();
-        return {};
-    }
-
     emu::frontend::ui::LibraryActions actions;
     actions.collectScan = collectScan;
     actions.isScanning = [&] { return scanning; };
@@ -695,7 +482,21 @@ std::string showGameMenu(const fs::path& folder,
             std::fprintf(stderr, "Could not save settings.ini\n");
         }
     };
-    actions.openSettings = [&] { showSettingsMenu(settings, font); };
+    actions.settings = &settings;
+    actions.hotkeys = &hotkeys;
+    actions.persistSettings = [&] {
+        if (!saveSettings(settings)) {
+            std::fprintf(stderr, "Could not save settings.ini\n");
+        }
+        std::string hotkey_error;
+        if (!hotkeys.save(hotkeyFile(), hotkey_error)) {
+            std::fprintf(stderr, "%s\n", hotkey_error.c_str());
+        }
+    };
+    actions.hasResumeState = [](const std::string& path) {
+        return saveStateManager().exists(
+            emu::frontend::SaveStateManager::kAutoSlot, gamePathKey(path));
+    };
     actions.installPs1Bios = [&] {
         importBios(emu::frontend::BiosSystem::Ps1, system_directory);
     };
@@ -716,9 +517,6 @@ std::string showGameMenu(const fs::path& folder,
 
     const std::string result =
         emu::frontend::ui::runLibraryScreen(games, folder, actions);
-
-    TTF_CloseFont(font);
-    TTF_Quit();
     return result;
 }
 
@@ -848,7 +646,9 @@ bool loadStateFromSlot(emu::System& system,
 int runGenericGame(const std::string& rom_path,
                    bool mute,
                    bool start_fullscreen,
-                   emu::frontend::Settings& settings) {
+                   emu::frontend::Settings& settings,
+                   emu::frontend::Hotkeys& hotkeys,
+                   bool resume_requested) {
     std::string error;
 
     // Per-game overrides from "<rom>.ini". Only keys the file actually
@@ -857,6 +657,10 @@ int runGenericGame(const std::string& rom_path,
     // every launch of a game that has no override for them.
     const emu::frontend::GameSettings game_settings =
         emu::frontend::loadGameSettings(rom_path);
+    // The const copy above records what the file said at launch. This one is
+    // what the overlay's "This game" page edits and writes back, so the two
+    // deliberately diverge once the user changes something.
+    emu::frontend::GameSettings mutable_game_settings = game_settings;
     if (game_settings.present.vsync) settings.vsync = game_settings.vsync;
     if (game_settings.present.show_fps)
         settings.show_fps = game_settings.show_fps;
@@ -899,7 +703,9 @@ int runGenericGame(const std::string& rom_path,
 
     // Cheats come from "<game>.cht" beside the ROM. They stay loaded so the
     // F9 toggle can turn them on and off without re-reading the file.
-    const std::vector<emu::frontend::Cheat> cheats =
+    // Not const any more: the overlay's Cheats page toggles individual
+    // entries and pushes the result back to the core.
+    std::vector<emu::frontend::Cheat> cheats =
         system->supportsPatches() ? emu::frontend::loadCheatFile(rom_path)
                                   : std::vector<emu::frontend::Cheat>{};
     bool cheats_enabled = !cheats.empty();
@@ -930,29 +736,19 @@ int runGenericGame(const std::string& rom_path,
         settings.rewind_seconds * 30, 2);
     bool rewinding = false;
 
-    // The pause menu only needs a font once it is opened, and opening one
-    // costs an SDL_ttf init, so both are deferred until then. A missing font
-    // is not fatal: the selected entry is always mirrored in the window title,
-    // which is also the only way to show it in the OpenGL render paths.
-    emu::frontend::PauseMenu menu;
-    TTF_Font* menu_font = nullptr;
-    bool menu_font_attempted = false;
+    // The pause menu, the save-state grid, the settings pages, the binding
+    // pages and the cheat list are all pages of one overlay now. The old
+    // PauseMenu drew with hard-coded colours and only in the windowed render
+    // path, so it ignored the theme and was invisible under FSR and CRT.
+    emu::frontend::ui::GameOverlay overlay;
+    emu::frontend::ui::GalleryScreen gallery;
+    emu::frontend::ui::ToastStack toasts;
+    emu::frontend::ui::InputMap overlay_input;
+    emu::frontend::GlOverlay gl_overlay;
     bool ttf_initialized_here = false;
-    const auto menuFont = [&]() -> TTF_Font* {
-        if (menu_font || menu_font_attempted) return menu_font;
-        menu_font_attempted = true;
-        if (TTF_WasInit() == 0) {
-            if (TTF_Init() != 0) {
-                std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
-                return nullptr;
-            }
-            ttf_initialized_here = true;
-        }
-        std::string font_error;
-        menu_font = emu::frontend::openUiFont(20, font_error);
-        if (!menu_font) std::fprintf(stderr, "%s\n", font_error.c_str());
-        return menu_font;
-    };
+    // A clean exit writes the auto-save; a render failure does not. A state
+    // captured mid-fault is worse than no state.
+    bool exited_cleanly = true;
 
     const bool rewind_supported = [&] {
         std::vector<uint8_t> probe;
@@ -1039,45 +835,71 @@ int runGenericGame(const std::string& rom_path,
         }
     }
 
-    // The input display needs the UI layer's painter and font cache, which
-    // cost four font opens, so they are built only if it is actually on. It
-    // also only works on the SDL renderer paths: FSR and CRT present through
-    // OpenGL and never touch this renderer.
-    std::unique_ptr<emu::frontend::ui::Painter> hud_painter;
-    std::unique_ptr<emu::frontend::ui::TextCache> hud_text;
-    emu::frontend::ui::Theme hud_theme;
-    emu::frontend::ui::Metrics hud_metrics;
-    bool hud_attempted = false;
+    // The overlay, the input display and the rewind bar all paint through the
+    // UI layer, which needs a Painter, a TextCache and a Theme. Four font
+    // opens is too much to pay on every launch, so they are built the first
+    // time something actually wants to draw.
+    //
+    // On the GL paths there is no SDL_Renderer to give them, so GlOverlay
+    // supplies a software one and composites the result over the frame. That
+    // is the only difference between the two paths from here on.
+    std::unique_ptr<emu::frontend::ui::Painter> ui_painter;
+    std::unique_ptr<emu::frontend::ui::TextCache> ui_text;
+    std::unique_ptr<emu::frontend::ArtworkCache> ui_art;
+    emu::frontend::ui::Theme ui_theme;
+    emu::frontend::ui::Metrics ui_metrics;
+    SDL_Renderer* ui_renderer = nullptr;
+    bool ui_failed = false;
 
-    const auto inputDisplayReady = [&] {
-        if (!settings.input_display || !renderer) return false;
-        if (hud_attempted) return hud_text != nullptr;
-        hud_attempted = true;
+    const auto uiReady = [&] {
+        if (ui_failed) return false;
+        if (ui_text) return true;
+
+        if (use_opengl) {
+            std::string overlay_error;
+            if (!gl_overlay.resize(window, overlay_error)) {
+                std::fprintf(stderr, "Overlay unavailable: %s\n",
+                             overlay_error.c_str());
+                ui_failed = true;
+                return false;
+            }
+            ui_renderer = gl_overlay.renderer();
+            ui_metrics.scale = gl_overlay.scale();
+        } else {
+            ui_renderer = renderer;
+            ui_metrics.scale =
+                emu::frontend::ui::displayScale(window, renderer);
+        }
+        if (!ui_renderer) {
+            ui_failed = true;
+            return false;
+        }
 
         if (TTF_WasInit() == 0) {
             if (TTF_Init() != 0) {
                 std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
+                ui_failed = true;
                 return false;
             }
             ttf_initialized_here = true;
         }
 
-        hud_metrics.scale =
-            emu::frontend::ui::displayScale(window, renderer);
-        hud_theme = emu::frontend::ui::repairTheme(
+        ui_theme = emu::frontend::ui::repairTheme(
             emu::frontend::ui::themePreset(
                 emu::frontend::ui::themeFromName(settings.theme)));
 
         auto cache = std::make_unique<emu::frontend::ui::TextCache>();
-        std::string hud_error;
-        if (!cache->open(hud_metrics.scale, hud_error)) {
-            std::fprintf(stderr, "Input display unavailable: %s\n",
-                         hud_error.c_str());
+        std::string font_error;
+        if (!cache->open(ui_metrics.scale, font_error)) {
+            std::fprintf(stderr, "Overlay unavailable: %s\n",
+                         font_error.c_str());
+            ui_failed = true;
             return false;
         }
-        hud_text = std::move(cache);
-        hud_painter =
-            std::make_unique<emu::frontend::ui::Painter>(renderer);
+        ui_text = std::move(cache);
+        ui_painter =
+            std::make_unique<emu::frontend::ui::Painter>(ui_renderer);
+        ui_art = std::make_unique<emu::frontend::ArtworkCache>(ui_renderer);
         return true;
     };
 
@@ -1144,14 +966,6 @@ int runGenericGame(const std::string& rom_path,
     bool frame_advance = false;
     bool fast_forward = false;
 
-    const auto syncMenuTitle = [&] {
-        SDL_SetWindowTitle(window,
-                           menu.isOpen()
-                               ? (base_title + " | PAUSED | " +
-                                  menu.selectedLabel()).c_str()
-                               : base_title.c_str());
-    };
-
     const auto toggleFullscreen = [&] {
         const bool is_fullscreen =
             (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
@@ -1160,56 +974,6 @@ int runGenericGame(const std::string& rom_path,
             std::fprintf(stderr, "Could not toggle fullscreen: %s\n",
                          SDL_GetError());
         }
-    };
-
-    // Slot 1 is what the menu reaches; F-keys still address all nine slots.
-    const auto activateMenuItem = [&] {
-        using emu::frontend::PauseAction;
-        switch (menu.selectedAction()) {
-        case PauseAction::Resume:
-            menu.close();
-            break;
-        case PauseAction::SaveState:
-            if (!saveStateToSlot(*system, rom_path, 1))
-                std::fprintf(stderr, "Save state slot 1 failed\n");
-            break;
-        case PauseAction::LoadState:
-            if (loadStateFromSlot(*system, rom_path, 1))
-                rewind_buffer.clear();
-            else
-                std::fprintf(stderr, "Load state slot 1 failed\n");
-            break;
-        case PauseAction::ResetGame:
-            system->reset();
-            rewind_buffer.clear();
-            menu.close();
-            break;
-        case PauseAction::ToggleVsync:
-            settings.vsync = !settings.vsync;
-            if (renderer) SDL_RenderSetVSync(renderer, settings.vsync ? 1 : 0);
-            else SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0);
-            break;
-        case PauseAction::ToggleFps:
-            settings.show_fps = !settings.show_fps;
-            break;
-        case PauseAction::DecreaseVolume:
-            emu::frontend::changeVolume(settings, -5);
-            break;
-        case PauseAction::IncreaseVolume:
-            emu::frontend::changeVolume(settings, 5);
-            break;
-        case PauseAction::ToggleMute:
-            settings.mute = !settings.mute;
-            break;
-        case PauseAction::ToggleFullscreen:
-            toggleFullscreen();
-            break;
-        case PauseAction::Quit:
-            running = false;
-            break;
-        }
-        paused = menu.isOpen();
-        syncMenuTitle();
     };
 
     std::array<SDL_GameController*, 2> gamepads{};
@@ -1248,58 +1012,243 @@ int runGenericGame(const std::string& rom_path,
         std::fprintf(stderr, "Controller support unavailable: %s\n", SDL_GetError());
     }
 
+    const auto notify = [&](std::string message,
+                            emu::frontend::ui::Toast::Kind kind) {
+        toasts.push(std::move(message), kind, SDL_GetTicks64());
+    };
+
+    // Shared by the hotkeys and the overlay so a state saved either way gets
+    // a thumbnail. Without one the slot grid shows "No image" for anything
+    // saved from the keyboard.
+    const auto saveSlotWithThumbnail = [&](int slot) {
+        if (!saveStateToSlot(*system, rom_path, slot)) {
+            std::fprintf(stderr,
+                         "Save state slot %d is unsupported or failed\n",
+                         slot);
+            return false;
+        }
+        std::string shot_error;
+        emu::frontend::savePngTo(
+            system->video(),
+            saveStateManager().thumbnailPath(slot, gamePathKey(rom_path)),
+            shot_error);
+        if (ui_art) ui_art->clear();
+        return true;
+    };
+
+    {
+        emu::frontend::ui::OverlayHooks hooks;
+        hooks.settings = &settings;
+        hooks.game_settings = &mutable_game_settings;
+        hooks.hotkeys = &hotkeys;
+        hooks.cheats = &cheats;
+        hooks.resume = [&] { paused = false; };
+        hooks.reset = [&] {
+            system->reset();
+            rewind_buffer.clear();
+            paused = false;
+        };
+        hooks.quit = [&] { running = false; };
+        hooks.toggleFullscreen = [&] { toggleFullscreen(); };
+        hooks.screenshot = [&] {
+            std::string shot_error;
+            const std::string path = emu::frontend::saveScreenshot(
+                system->video(), rom_path, shot_error);
+            if (path.empty()) {
+                notify("Screenshot failed: " + shot_error,
+                       emu::frontend::ui::Toast::Kind::Error);
+            } else {
+                notify("Saved " + fs::path(path).filename().string(),
+                       emu::frontend::ui::Toast::Kind::Success);
+            }
+        };
+        hooks.openGallery = [&] {
+            overlay.close();
+            gallery.open(rom_path);
+        };
+        hooks.applySettings = [&] {
+            if (renderer) SDL_RenderSetVSync(renderer, settings.vsync ? 1 : 0);
+            else SDL_GL_SetSwapInterval(settings.vsync ? 1 : 0);
+        };
+        hooks.persistSettings = [&] {
+            if (!emu::frontend::saveSettings(settings)) {
+                std::fprintf(stderr, "Could not save settings.ini\n");
+            }
+            std::string hotkey_error;
+            if (!hotkeys.save(hotkeyFile(), hotkey_error)) {
+                std::fprintf(stderr, "%s\n", hotkey_error.c_str());
+            }
+        };
+        hooks.persistGameOptions = [&] {
+            if (!emu::frontend::saveGameSettings(rom_path,
+                                                 mutable_game_settings)) {
+                notify("Could not write the per-game overrides.",
+                       emu::frontend::ui::Toast::Kind::Error);
+            }
+        };
+        hooks.cheatsChanged = [&] { pushCheats(); };
+        hooks.saveSlot = [&](int slot) {
+            if (!saveSlotWithThumbnail(slot)) {
+                notify("This core cannot save states.",
+                       emu::frontend::ui::Toast::Kind::Error);
+                return false;
+            }
+            notify("Saved to slot " + std::to_string(slot),
+                   emu::frontend::ui::Toast::Kind::Success);
+            return true;
+        };
+        hooks.loadSlot = [&](int slot) {
+            if (!loadStateFromSlot(*system, rom_path, slot)) {
+                notify("Slot " + std::to_string(slot) + " is empty.",
+                       emu::frontend::ui::Toast::Kind::Error);
+                return false;
+            }
+            // History captured before the jump no longer belongs to this
+            // timeline.
+            rewind_buffer.clear();
+            paused = false;
+            return true;
+        };
+        hooks.deleteSlot = [&](int slot) {
+            std::string state_error;
+            const bool ok = saveStateManager().remove(
+                slot, gamePathKey(rom_path), state_error);
+            if (!ok) {
+                notify(state_error, emu::frontend::ui::Toast::Kind::Error);
+            }
+            if (ui_art) ui_art->clear();
+            return ok;
+        };
+        hooks.slotView = [&](int slot) {
+            emu::frontend::ui::SlotView view;
+            const emu::frontend::SlotInfo info =
+                saveStateManager().info(slot, gamePathKey(rom_path));
+            view.exists = info.exists;
+            if (!info.exists) return view;
+
+            char when[64] = {};
+            if (const std::tm* local = std::localtime(&info.saved_at)) {
+                std::strftime(when, sizeof(when), "%d %b %H:%M", local);
+                view.when = when;
+            }
+            char size[32] = {};
+            std::snprintf(size, sizeof(size), "%.1f MB",
+                          static_cast<double>(info.bytes) / (1024.0 * 1024.0));
+            view.size = size;
+            if (!info.thumbnail.empty() && ui_art) {
+                view.thumbnail = ui_art->get(info.thumbnail.string());
+            }
+            return view;
+        };
+        hooks.pad = [&] {
+            return emu::frontend::ui::readController(gamepads[0]);
+        };
+        hooks.notify = notify;
+        overlay.setHooks(std::move(hooks));
+    }
+
+    // Slot 0 is written on a clean exit. Loading it here is what makes
+    // "Continue" on the library's detail pane mean anything.
+    if (resume_requested && rewind_supported) {
+        if (loadStateFromSlot(*system, rom_path,
+                              emu::frontend::SaveStateManager::kAutoSlot)) {
+            rewind_buffer.clear();
+            std::printf("Resumed from the auto-save.\n");
+        } else {
+            std::fprintf(stderr, "There is no auto-save for this game.\n");
+        }
+    }
+
     while (running) {
+        // The overlay works in render pixels and the mouse reports logical
+        // ones, so both the hit tests and the paint need this before any event
+        // is looked at.
+        int window_width = 0;
+        int window_height = 0;
+        SDL_GetWindowSize(window, &window_width, &window_height);
+        const SDL_Rect window_rect{
+            0, 0,
+            static_cast<int>(window_width * ui_metrics.scale),
+            static_cast<int>(window_height * ui_metrics.scale)};
+
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) {
                 running = false;
-            } else if (event.type == SDL_KEYDOWN && menu.isOpen()) {
-                // While the menu is up it owns the keyboard, so the arrow keys
-                // navigate instead of also reaching the game, and Escape backs
-                // out of the menu rather than quitting.
-                const SDL_Scancode scancode = event.key.keysym.scancode;
-                if (scancode == SDL_SCANCODE_UP) {
-                    menu.moveUp();
-                    syncMenuTitle();
-                } else if (scancode == SDL_SCANCODE_DOWN) {
-                    menu.moveDown();
-                    syncMenuTitle();
-                } else if (scancode == SDL_SCANCODE_RETURN ||
-                           scancode == SDL_SCANCODE_KP_ENTER) {
-                    if (!event.key.repeat) activateMenuItem();
-                } else if (scancode == SDL_SCANCODE_ESCAPE ||
-                           scancode == SDL_SCANCODE_F1) {
-                    menu.close();
-                    paused = false;
-                    syncMenuTitle();
+            } else if (overlay.isOpen() || gallery.isOpen()) {
+                // An open overlay owns the keyboard and the mouse. Anything
+                // it does not consume is dropped rather than passed on: the
+                // game must not act on a keypress meant for the menu.
+                const emu::frontend::ui::UiAction action =
+                    overlay_input.translate(&event);
+
+                if (gallery.isOpen()) {
+                    if (!gallery.handleEvent(event, window_rect, ui_metrics,
+                                             ui_metrics.scale)) {
+                        gallery.handleAction(action);
+                    }
+                    std::string deleted;
+                    if (gallery.consumeDeleted(deleted)) {
+                        notify("Deleted " + deleted,
+                               emu::frontend::ui::Toast::Kind::Info);
+                    }
+                } else {
+                    // A pad button pressed while a binding row is armed is a
+                    // binding, not navigation.
+                    const bool bound =
+                        overlay.capturing() &&
+                        event.type == SDL_CONTROLLERBUTTONDOWN &&
+                        overlay.captureButton(
+                            static_cast<SDL_GameControllerButton>(
+                                event.cbutton.button));
+                    if (!bound &&
+                        !overlay.handleEvent(event, window_rect, ui_metrics,
+                                             ui_metrics.scale)) {
+                        overlay.handleAction(action);
+                    }
                 }
-            } else if (event.type == SDL_KEYDOWN &&
-                       event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) {
-                running = false;
-            } else if (event.type == SDL_KEYDOWN && !event.key.repeat &&
-                       event.key.keysym.scancode == SDL_SCANCODE_F1 &&
-                       (event.key.keysym.mod & KMOD_SHIFT) == 0) {
-                menu.open();
-                paused = true;
-                menuFont();
-                syncMenuTitle();
-            } else if (event.type == SDL_KEYDOWN && !event.key.repeat &&
-                       event.key.keysym.scancode == SDL_SCANCODE_F11) {
-                toggleFullscreen();
+
+                // Closing the last overlay resumes: leaving the game paused
+                // with nothing on screen looks like a freeze.
+                if (!overlay.isOpen() && !gallery.isOpen()) paused = false;
             } else if (event.type == SDL_KEYDOWN && !event.key.repeat) {
-                const SDL_Keycode key = event.key.keysym.sym;
-                if (key == SDLK_p) {
+                // Every single-combination action comes from the hotkey table
+                // now, so all of these are rebindable instead of being
+                // literals in this switch.
+                using emu::frontend::HotkeyAction;
+                switch (hotkeys.resolve(event.key.keysym)) {
+                case HotkeyAction::PauseMenu:
+                    if (uiReady()) {
+                        overlay.open(emu::frontend::ui::OverlayPage::Pause);
+                        paused = true;
+                    }
+                    break;
+                case HotkeyAction::StateMenu:
+                    if (uiReady()) {
+                        overlay.open(emu::frontend::ui::OverlayPage::States);
+                        paused = true;
+                    }
+                    break;
+                case HotkeyAction::TogglePause:
                     paused = !paused;
-                } else if (key == SDLK_n && paused) {
-                    frame_advance = true;
-                } else if (key == SDLK_TAB) {
+                    break;
+                case HotkeyAction::FrameAdvance:
+                    if (paused) frame_advance = true;
+                    break;
+                case HotkeyAction::FastForward:
                     fast_forward = !fast_forward;
-                } else if (key == SDLK_F9 && !cheats.empty()) {
-                    cheats_enabled = !cheats_enabled;
-                    pushCheats();
-                    std::printf("Cheats %s\n",
-                                cheats_enabled ? "enabled" : "disabled");
-                } else if (key == SDLK_F10) {
+                    break;
+                case HotkeyAction::QuickSave:
+                    saveSlotWithThumbnail(1);
+                    break;
+                case HotkeyAction::QuickLoad:
+                    if (loadStateFromSlot(*system, rom_path, 1)) {
+                        rewind_buffer.clear();
+                    } else {
+                        std::fprintf(stderr, "Quick load failed\n");
+                    }
+                    break;
+                case HotkeyAction::Screenshot: {
                     std::string shot_error;
                     const std::string path = emu::frontend::saveScreenshot(
                         system->video(), rom_path, shot_error);
@@ -1309,51 +1258,74 @@ int runGenericGame(const std::string& rom_path,
                     } else {
                         std::printf("Saved %s\n", path.c_str());
                     }
-                } else if (key == SDLK_F12) {
-                    showDebugInfo(*system);
-                } else if (key == SDLK_MINUS || key == SDLK_KP_MINUS) {
-                    settings.volume = std::max(0, settings.volume - 5);
-                } else if (key == SDLK_EQUALS || key == SDLK_KP_PLUS) {
-                    settings.volume = std::min(100, settings.volume + 5);
-                } else if (key == SDLK_m) {
-                    settings.mute = !settings.mute;
-                } else if (key >= SDLK_F1 && key <= SDLK_F9 &&
-                           (event.key.keysym.mod & KMOD_SHIFT)) {
-                    // Plain F1 opens the pause menu, so saving is on
-                    // Shift+F1-F9 for every slot rather than only for slot 1.
-                    const int slot = static_cast<int>(key - SDLK_F1) + 1;
-                    if (!saveStateToSlot(*system, rom_path, slot)) {
-                        std::fprintf(stderr,
-                                     "Save state slot %d is unsupported or failed\n",
-                                     slot);
-                    }
-                } else if (key >= SDLK_1 && key <= SDLK_9 &&
-                           (event.key.keysym.mod & KMOD_CTRL)) {
-                    const int slot = static_cast<int>(key - SDLK_1) + 1;
-                    if (loadStateFromSlot(*system, rom_path, slot)) {
-                        // History captured before the jump no longer belongs
-                        // to this timeline.
-                        rewind_buffer.clear();
-                    } else {
-                        std::fprintf(stderr,
-                                     "Load state slot %d is unsupported or failed\n",
-                                     slot);
-                    }
+                    break;
                 }
-            } else if (event.type == SDL_CONTROLLERBUTTONDOWN && menu.isOpen()) {
-                const Uint8 button = event.cbutton.button;
-                if (button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
-                    menu.moveUp();
-                    syncMenuTitle();
-                } else if (button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
-                    menu.moveDown();
-                    syncMenuTitle();
-                } else if (button == SDL_CONTROLLER_BUTTON_A) {
-                    activateMenuItem();
-                } else if (button == SDL_CONTROLLER_BUTTON_B) {
-                    menu.close();
-                    paused = false;
-                    syncMenuTitle();
+                case HotkeyAction::Gallery:
+                    if (uiReady()) {
+                        gallery.open(rom_path);
+                        paused = true;
+                    }
+                    break;
+                case HotkeyAction::ToggleCheats:
+                    if (!cheats.empty()) {
+                        cheats_enabled = !cheats_enabled;
+                        pushCheats();
+                        std::printf("Cheats %s\n",
+                                    cheats_enabled ? "enabled" : "disabled");
+                    }
+                    break;
+                case HotkeyAction::DebugInfo:
+                    showDebugInfo(*system);
+                    break;
+                case HotkeyAction::VolumeDown:
+                    emu::frontend::changeVolume(settings, -5);
+                    break;
+                case HotkeyAction::VolumeUp:
+                    emu::frontend::changeVolume(settings, 5);
+                    break;
+                case HotkeyAction::ToggleMute:
+                    settings.mute = !settings.mute;
+                    break;
+                case HotkeyAction::ToggleFullscreen:
+                    toggleFullscreen();
+                    break;
+                case HotkeyAction::ToggleFps:
+                    settings.show_fps = !settings.show_fps;
+                    break;
+                case HotkeyAction::ToggleInputDisplay:
+                    settings.input_display = !settings.input_display;
+                    break;
+                case HotkeyAction::Reset:
+                    system->reset();
+                    rewind_buffer.clear();
+                    break;
+                case HotkeyAction::Quit:
+                    running = false;
+                    break;
+                case HotkeyAction::None:
+                default: {
+                    // The per-slot ranges stay outside the table: they are a
+                    // span of keys, not one combination, so resolve() cannot
+                    // express them. They are only checked after the table
+                    // misses, so a user binding on F1-F9 wins.
+                    const SDL_Keycode key = event.key.keysym.sym;
+                    if (key >= SDLK_F1 && key <= SDLK_F9 &&
+                        (event.key.keysym.mod & KMOD_SHIFT)) {
+                        saveSlotWithThumbnail(
+                            static_cast<int>(key - SDLK_F1) + 1);
+                    } else if (key >= SDLK_1 && key <= SDLK_9 &&
+                               (event.key.keysym.mod & KMOD_CTRL)) {
+                        const int slot = static_cast<int>(key - SDLK_1) + 1;
+                        if (loadStateFromSlot(*system, rom_path, slot)) {
+                            rewind_buffer.clear();
+                        } else {
+                            std::fprintf(stderr,
+                                         "Load state slot %d is unsupported "
+                                         "or failed\n", slot);
+                        }
+                    }
+                    break;
+                }
                 }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                 // Added events carry a device index.
@@ -1377,7 +1349,8 @@ int runGenericGame(const std::string& rom_path,
         const Uint8* keyboard = SDL_GetKeyboardState(nullptr);
         // The menu owns the input while it is up: held keys must not reach the
         // game, and Backspace must navigate rather than rewind.
-        rewinding = rewind_supported && !menu.isOpen() &&
+        rewinding = rewind_supported && !overlay.isOpen() &&
+                    !gallery.isOpen() &&
                     keyboard[SDL_SCANCODE_BACKSPACE];
         const std::string system_name = normalizedButtonName(system->name());
         const bool is_pico8 = system_name == "PICO-8" || system_name == "PICO8";
@@ -1427,7 +1400,8 @@ int runGenericGame(const std::string& rom_path,
                 if (down) button_state |= button.mask;
             }
 
-            system->setInput(port, menu.isOpen() ? 0u : button_state);
+            system->setInput(port, (overlay.isOpen() || gallery.isOpen())
+                                       ? 0u : button_state);
         }
 
         if (rewinding) {
@@ -1442,6 +1416,62 @@ int runGenericGame(const std::string& rom_path,
             system->runFrame();
             frame_advance = false;
         }
+        // One overlay painter for both present paths. The windowed path draws
+        // onto the renderer it already has; the GL path draws onto
+        // GlOverlay's software renderer and has the result composited over
+        // the frame. Keeping it in one lambda is what stops the two drifting:
+        // the old pause menu lived only in the windowed branch, so it was
+        // invisible under FSR and CRT.
+        const auto paintOverlays = [&](SDL_Renderer* target) {
+            if (!target || !ui_text || !ui_painter) return false;
+            bool painted = false;
+            const std::uint64_t now = SDL_GetTicks64();
+
+            if (overlay.isOpen()) {
+                overlay.draw(target, *ui_painter, *ui_text, ui_theme,
+                             ui_metrics, window_rect, now);
+                painted = true;
+            }
+            if (gallery.isOpen() && ui_art) {
+                gallery.draw(target, *ui_painter, *ui_text, ui_theme,
+                             ui_metrics, window_rect, *ui_art);
+                painted = true;
+            }
+            if (rewinding) {
+                emu::frontend::ui::drawRewindBar(
+                    target, *ui_painter, *ui_text, ui_theme, ui_metrics,
+                    window_rect, rewind_buffer.depth(),
+                    rewind_buffer.capacity(), rewind_buffer.seconds());
+                painted = true;
+            }
+            if (settings.input_display) {
+                // Read straight from the pad rather than from the joypad
+                // state the core sees, so the display shows what the hardware
+                // is doing even when a binding is wrong.
+                for (int port = 0;
+                     port < static_cast<int>(gamepads.size()); ++port) {
+                    if (!gamepads[port]) continue;
+                    emu::frontend::ui::drawInputDisplay(
+                        target, *ui_painter, *ui_text, ui_theme, ui_metrics,
+                        window_rect,
+                        emu::frontend::ui::readController(gamepads[port]),
+                        255, port);
+                    painted = true;
+                }
+            }
+            if (toasts.active(now)) {
+                toasts.draw(target, *ui_painter, *ui_text, ui_theme,
+                            ui_metrics, window_rect, now);
+                painted = true;
+            }
+            ui_text->endFrame();
+            return painted;
+        };
+
+        const bool wants_overlay =
+            overlay.isOpen() || gallery.isOpen() || rewinding ||
+            settings.input_display || toasts.active(SDL_GetTicks64());
+
         if (use_opengl) {
             const bool rendered = use_crt
                 ? crt.render(system->video(), system->aspectRatio(),
@@ -1451,75 +1481,69 @@ int runGenericGame(const std::string& rom_path,
             if (!rendered) {
                 std::fprintf(stderr, "%s render failed: %s\n",
                              use_crt ? "CRT filter" : "FSR", error.c_str());
+                exited_cleanly = false;
                 break;
+            }
+
+            if (wants_overlay && uiReady()) {
+                std::string overlay_error;
+                if (gl_overlay.resize(window, overlay_error)) {
+                    // A resize reallocates the software renderer, so the
+                    // Painter's cached circle textures and the TextCache's
+                    // glyphs belong to a renderer that no longer exists.
+                    // Rebuilding all three is the only safe response.
+                    if (gl_overlay.renderer() != ui_renderer) {
+                        ui_renderer = gl_overlay.renderer();
+                        ui_metrics.scale = gl_overlay.scale();
+                        ui_art.reset();
+                        ui_painter.reset();
+                        ui_text->close();
+                        std::string font_error;
+                        if (ui_text->open(ui_metrics.scale, font_error)) {
+                            ui_painter = std::make_unique<
+                                emu::frontend::ui::Painter>(ui_renderer);
+                            ui_art = std::make_unique<
+                                emu::frontend::ArtworkCache>(ui_renderer);
+                        } else {
+                            std::fprintf(stderr, "Overlay lost: %s\n",
+                                         font_error.c_str());
+                            ui_text.reset();
+                            ui_failed = true;
+                        }
+                    }
+                    gl_overlay.clear();
+                    if (paintOverlays(gl_overlay.renderer())) {
+                        gl_overlay.markDrawn();
+                    }
+                    gl_overlay.composite();
+                }
             }
             SDL_GL_SwapWindow(window);
         } else {
             if (!updateTexture()) {
-                std::fprintf(stderr, "Could not update the game image: %s\n", SDL_GetError());
+                std::fprintf(stderr, "Could not update the game image: %s\n",
+                             SDL_GetError());
+                exited_cleanly = false;
                 break;
             }
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
             SDL_RenderClear(renderer);
-            int window_width = 0;
-            int window_height = 0;
-            SDL_GetWindowSize(window, &window_width, &window_height);
+
             const emu::VideoFrame frame = system->video();
             const SDL_Rect viewport = emu::frontend::calculateViewport(
                 window_width, window_height, frame.width, frame.height,
                 system->aspectRatio(), settings.scaling);
             SDL_RenderCopy(renderer, texture, nullptr, &viewport);
 
-            if (menu.isOpen()) {
-                if (TTF_Font* font = menuFont()) {
-                    constexpr int kRowHeight = 32;
-                    const int rows = static_cast<int>(menu.itemCount());
-                    const SDL_Rect panel{
-                        (window_width - 320) / 2,
-                        (window_height - (rows * kRowHeight + 32)) / 2,
-                        320, rows * kRowHeight + 32};
-
-                    drawMenuPanel(renderer, panel, SDL_Color{16, 18, 26, 240},
-                                  SDL_Color{60, 68, 86, 255},
-                                  SDL_Color{70, 130, 220, 255});
-
-                    for (int row = 0; row < rows; ++row) {
-                        const bool is_selected =
-                            static_cast<std::size_t>(row) == menu.selectedIndex();
-                        const SDL_Rect line{panel.x + 10,
-                                            panel.y + 16 + row * kRowHeight,
-                                            panel.w - 20, kRowHeight};
-                        if (is_selected) {
-                            SDL_SetRenderDrawColor(renderer, 30, 88, 178, 255);
-                            SDL_RenderFillRect(renderer, &line);
-                        }
-                        drawMenuText(renderer, font,
-                                     menu.itemLabel(
-                                         static_cast<std::size_t>(row)),
-                                     line.x + 12, line.y + 5,
-                                     is_selected
-                                         ? SDL_Color{255, 255, 255, 255}
-                                         : SDL_Color{188, 196, 212, 255});
-                    }
-                }
-            }
-
-            // Read straight from the pad rather than from the joypad
-            // state the core sees, so the display shows what the hardware is
-            // doing even when a binding is wrong.
-            if (inputDisplayReady()) {
-                emu::frontend::ui::drawInputDisplay(
-                    renderer, *hud_painter, *hud_text, hud_theme, hud_metrics,
-                    SDL_Rect{0, 0, window_width, window_height},
-                    emu::frontend::ui::readController(gamepads[0]), 255);
-            }
+            if (wants_overlay && uiReady()) paintOverlays(renderer);
 
             SDL_RenderPresent(renderer);
         }
 
-        // The menu keeps the window title, so the FPS counter must not
-        // overwrite it while the menu is up.
-        if (settings.show_fps && !menu.isOpen()) {
+        // The overlay draws over the picture rather than renaming the
+        // window, so the FPS counter is only suppressed to keep the title
+        // steady while a menu is up.
+        if (settings.show_fps && !overlay.isOpen() && !gallery.isOpen()) {
             ++fps_frame_count;
             const Uint64 fps_now = SDL_GetPerformanceCounter();
             const double elapsed = static_cast<double>(fps_now - fps_window_start) /
@@ -1564,15 +1588,32 @@ int runGenericGame(const std::string& rom_path,
         }
     }
 
-    // Both hold textures from `renderer`, so they go before it does.
-    hud_painter.reset();
-    hud_text.reset();
+    // A clean exit leaves a resume point in slot 0. A render failure does
+    // not: a state captured mid-fault is worse than none.
+    if (exited_cleanly && rewind_supported) {
+        if (saveStateToSlot(*system, rom_path,
+                            emu::frontend::SaveStateManager::kAutoSlot)) {
+            std::string shot_error;
+            emu::frontend::savePngTo(
+                system->video(),
+                saveStateManager().thumbnailPath(
+                    emu::frontend::SaveStateManager::kAutoSlot,
+                    gamePathKey(rom_path)),
+                shot_error);
+        }
+    }
+
+    // All three hold textures from a renderer, so they go before it does -
+    // and before gl_overlay, which owns the GL path's renderer.
+    ui_art.reset();
+    ui_painter.reset();
+    ui_text.reset();
+    gl_overlay.shutdown();
 
     for (SDL_GameController* gamepad : gamepads) {
         if (gamepad) SDL_GameControllerClose(gamepad);
     }
-    if (menu_font) TTF_CloseFont(menu_font);
-    // Only tear SDL_ttf down if the pause menu is what brought it up.
+    // Only tear SDL_ttf down if the overlay is what brought it up.
     if (ttf_initialized_here) TTF_Quit();
     if (audio) SDL_CloseAudioDevice(audio);
     if (texture) SDL_DestroyTexture(texture);
@@ -2020,6 +2061,7 @@ int main(int argc, char** argv) {
     fs::path games_folder = "games";
     bool mute = settings.mute;
     bool fullscreen = settings.fullscreen;
+    bool resume_requested = false;
     bool verbose = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -2052,6 +2094,8 @@ int main(int argc, char** argv) {
             core_server_url = argv[++i];
         } else if (arg == "--input-display") {
             settings.input_display = true;
+        } else if (arg == "--resume") {
+            resume_requested = true;
         } else if (arg == "--core-server-unverified") {
             core_server_verify = false;
         } else if (arg == "--core-server") {
@@ -2101,6 +2145,14 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    // One set of bindings for the whole process: rebinding from the library
+    // screen has to be visible in the game loop without a restart.
+    emu::frontend::Hotkeys hotkeys;
+    {
+        std::string hotkey_error;
+        hotkeys.load(hotkeyFile(), hotkey_error);
+    }
+
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
@@ -2133,8 +2185,8 @@ int main(int argc, char** argv) {
 
     if (rom_path.empty() && ps1_game_path.empty() && ps2_game_path.empty()) {
         rom_path = showGameMenu(
-            games_folder, settings, system_directory, core_server_url,
-            core_server_verify, library_server_url);
+            games_folder, settings, hotkeys, system_directory,
+            core_server_url, core_server_verify, library_server_url);
         mute = settings.mute;
         fullscreen = settings.fullscreen;
         if (rom_path.empty()) {
@@ -2199,5 +2251,6 @@ int main(int argc, char** argv) {
         return result;
     }
 
-    return runGenericGame(rom_path, mute, fullscreen, settings);
+    return runGenericGame(rom_path, mute, fullscreen, settings, hotkeys,
+                          resume_requested);
 }

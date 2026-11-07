@@ -17,10 +17,16 @@ public:
     bool empty() const { return states_.empty(); }
     size_t depth() const { return states_.size(); }
     size_t bytes() const { return bytes_; }
+    size_t capacity() const { return max_states_; }
+    unsigned interval() const { return interval_; }
+
+    float seconds() const {
+        if (interval_ == 0) return 0.0f;
+        return static_cast<float>(states_.size() * interval_) / 60.0f;
+    }
+
 
     void capture(const System& system) {
-        // A zero budget means rewind is off: serializing here would be work
-        // whose result the trim loop below throws away immediately.
         if (max_states_ == 0 || interval_ == 0) return;
         if ((frame_++ % interval_) != 0) return;
         std::vector<uint8_t> state;

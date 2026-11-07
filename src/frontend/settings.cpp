@@ -186,20 +186,47 @@ GameSettings loadGameSettings(const std::string& game_path) {
 
 bool saveGameSettings(const std::string& game_path,
                       const GameSettings& settings) {
+    if (!settings.present.scale && !settings.present.integer_scale &&
+        !settings.present.bilinear_filter && !settings.present.vsync &&
+        !settings.present.show_fps && !settings.present.mute_audio &&
+        !settings.present.fast_forward_speed) {
+        std::error_code ec;
+        std::filesystem::remove(game_path + ".ini", ec);
+        return !ec;
+    }
+
     std::ofstream file(game_path + ".ini", std::ios::trunc);
     if (!file) return false;
 
-    file << "scale=" << std::clamp(settings.scale, 1, 8) << '\n'
-         << "integer_scale=" << (settings.integer_scale ? "true" : "false") << '\n'
-         << "bilinear_filter=" << (settings.bilinear_filter ? "true" : "false") << '\n'
-         << "vsync=" << (settings.vsync ? "true" : "false") << '\n'
-         << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n'
-         << "mute_audio=" << (settings.mute_audio ? "true" : "false") << '\n'
-         << "fast_forward_speed="
-         << std::clamp(settings.fast_forward_speed, 1, 8) << '\n';
+    if (settings.present.scale) {
+        file << "scale=" << std::clamp(settings.scale, 1, 8) << '\n';
+    }
+    if (settings.present.integer_scale) {
+        file << "integer_scale="
+             << (settings.integer_scale ? "true" : "false") << '\n';
+    }
+    if (settings.present.bilinear_filter) {
+        file << "bilinear_filter="
+             << (settings.bilinear_filter ? "true" : "false") << '\n';
+    }
+    if (settings.present.vsync) {
+        file << "vsync=" << (settings.vsync ? "true" : "false") << '\n';
+    }
+    if (settings.present.show_fps) {
+        file << "show_fps=" << (settings.show_fps ? "true" : "false") << '\n';
+    }
+    if (settings.present.mute_audio) {
+        file << "mute_audio=" << (settings.mute_audio ? "true" : "false")
+             << '\n';
+    }
+    if (settings.present.fast_forward_speed) {
+        file << "fast_forward_speed="
+             << std::clamp(settings.fast_forward_speed, 1, 8) << '\n';
+    }
 
     return file.good();
 }
+
 
 bool ControllerProfileManager::validate(
     const ControllerProfile& profile,
@@ -390,8 +417,6 @@ Settings loadSettings() {
             } catch (...) {
                 settings.audio_buffer_samples = 1024;
             }
-        } else if (key == "audio_device") {
-            settings.audio_device = value;
         } else if (key == "audio_device") {
             settings.audio_device = value;
         } else if (key == "scaling") {

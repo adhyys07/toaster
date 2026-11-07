@@ -396,13 +396,19 @@ void drawController(SDL_Renderer* renderer, Painter& painter, TextCache& text,
 void drawInputDisplay(SDL_Renderer* renderer, Painter& painter,
                       TextCache& text, const Theme& theme, const Metrics& m,
                       const SDL_Rect& window, const ControllerSnapshot& state,
-                      Uint8 opacity) {
+                      Uint8 opacity, int port) {
     if (!state.connected || opacity == 0) return;
 
     const int width = m.px(220);
     const int height = static_cast<int>(width * kAspect) + m.px(30);
+    const int step = height + m.px(8);
     const SDL_Rect box{window.x + window.w - width - m.pad(),
-                       window.y + window.h - height - m.pad(), width, height};
+                       window.y + window.h - height - m.pad() - port * step,
+                       width, height};
+
+    // A read-out pushed off the top of the window by a high port number is
+    // worse than no read-out: it would paint half a pad over the game.
+    if (box.y < window.y) return;
 
     painter.roundedRect(box, m.radius(),
                         withAlpha(theme.bg,
@@ -410,6 +416,10 @@ void drawInputDisplay(SDL_Renderer* renderer, Painter& painter,
     drawController(renderer, painter, text, theme, m,
                    inset(box, m.px(8)), state,
                    SDL_CONTROLLER_BUTTON_INVALID, 0);
+
+    const std::string label = "P" + std::to_string(port + 1);
+    text.draw(renderer, FontRole::Small, label, box.x + m.px(6),
+              box.y + m.px(4), withAlpha(theme.accent, opacity));
 }
 
 

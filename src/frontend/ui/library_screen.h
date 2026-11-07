@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../game_entry.h"
+#include "../hotkeys.h"
+#include "../settings.h"
 
 #include <filesystem>
 #include <functional>
@@ -35,10 +37,8 @@ struct LibraryActions {
 
     std::function<void(const std::string& path)> markPlayed;
 
-    // These still open their own windows. Converting them to in-window
-    // overlays is the next step; the screen already dims and repaints
-    // correctly when they return.
-    std::function<void()> openSettings;
+    // Opened as in-window overlays by the screen itself. The installers
+    // below stay OS dialogs because that is what they are.
     std::function<void()> installPs1Bios;
     std::function<void()> installPs2Bios;
     std::function<void()> installCores;
@@ -54,6 +54,15 @@ struct LibraryActions {
     // One short line for the footer, e.g. "Total 48  Plays 12". Empty hides
     // it.
     std::function<std::string()> statusLine;
+
+    // Global settings and hotkeys, edited through the overlay's Video, Audio,
+    // Controller and Keyboard pages rather than a second OS window.
+    emu::frontend::Settings* settings = nullptr;
+    emu::frontend::Hotkeys* hotkeys = nullptr;
+    std::function<void()> persistSettings;
+
+    // True when the game has an auto-save to continue from.
+    std::function<bool(const std::string& path)> hasResumeState;
 };
 
 // Runs the library until the user launches something or quits. Returns the
