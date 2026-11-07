@@ -46,6 +46,11 @@ struct LibraryActions {
     // Returns an empty string when the dialog was cancelled.
     std::function<std::string()> browseForGame;
 
+    // The theme named in settings.ini, and a way to persist a new choice.
+    // "custom" means read theme.ini.
+    std::function<std::string()> themeName;
+    std::function<void(const std::string& name)> setThemeName;
+
     // One short line for the footer, e.g. "Total 48  Plays 12". Empty hides
     // it.
     std::function<std::string()> statusLine;

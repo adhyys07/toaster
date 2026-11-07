@@ -45,6 +45,12 @@ struct Settings {
     int rewind_seconds = 10;
     int volume = 100;
     int audio_buffer_samples = 1024;
+    std::string theme = "midnight";
+
+    // Draws a live controller read-out over the game. Only the SDL renderer
+    // paths can show it; the FSR and CRT paths present through OpenGL and
+    // never touch this renderer.
+    bool input_display = false;
     std::string audio_device;
     ScalingMode scaling = ScalingMode::Aspect;
     std::array<int, kPadActionCount> keyboard_keys{
@@ -79,9 +85,6 @@ struct GameSettings {
     bool mute_audio = false;
     int fast_forward_speed = 2;
 
-    // Which keys the per-game .ini actually contained. Every other field holds
-    // a default, so applying it unconditionally would silently reset the
-    // matching global setting on each launch; callers must check these first.
     struct Present {
         bool scale = false;
         bool integer_scale = false;

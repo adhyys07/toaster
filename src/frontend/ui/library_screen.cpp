@@ -1,12 +1,15 @@
 #include "library_screen.h"
 
 #include "../artwork_cache.h"
+#include "controller_view.h"
 #include "game_view.h"
 #include "input_map.h"
 #include "layout.h"
 #include "painter.h"
 #include "text_cache.h"
 #include "theme.h"
+#include "theme_io.h"
+#include "theme_screen.h"
 #include "widgets.h"
 
 #include <SDL.h>
@@ -23,9 +26,6 @@
 namespace emu::frontend::ui {
 namespace {
 
-// SDL_GetTicks64 arrived in 2.0.18. The 32-bit counter wraps after 49 days,
-// which unsigned subtraction handles, but the 64-bit one is used where it
-// exists so the arithmetic needs no thought.
 std::uint64_t nowMs() {
 #if SDL_VERSION_ATLEAST(2, 0, 18)
     return SDL_GetTicks64();
@@ -34,8 +34,6 @@ std::uint64_t nowMs() {
 #endif
 }
 
-// Stable ids, so a mouse move repaints only when the widget under the cursor
-// actually changes.
 enum : WidgetId {
     kIdSettings = 1,
     kIdPs1Bios,
@@ -45,6 +43,7 @@ enum : WidgetId {
     kIdOpen,
     kIdRescan,
     kIdToggleView,
+    kIdTheme,
     kIdSearchField,
 
     kIdChipFirst = 100,
@@ -132,12 +131,13 @@ Widgets buildWidgets(const LibraryLayout& l, const Metrics& m,
                      bool have_selection) {
     Widgets widgets;
 
-    widgets.header.reserve(4);
+    widgets.header.reserve(5);
     // The old menu drew only the PS2 button but still handled clicks on an
     // undrawn PS1 rect beside it, so installing a PS1 BIOS meant clicking
     // blank space. Both are real buttons now.
     appendRightToLeft(widgets.header, l.header, m, text,
                       {{kIdSettings, "Settings"},
+                       {kIdTheme, "Theme"},
                        {kIdCores, "Install Cores"},
                        {kIdPs2Bios, "PS2 BIOS"},
                        {kIdPs1Bios, "PS1 BIOS"}},
@@ -427,7 +427,32 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
 
     float scale = displayScale(window, renderer);
 
-    Theme theme;
+    // The theme comes from settings.ini; "custom" reads theme.ini beside the
+    // executable. A broken or missing theme file must never stop the library
+    // opening, so every failure falls back to the default and says so.
+    ThemeId theme_id = themeFromName(
+        actions.themeName ? actions.themeName() : std::string("midnight"));
+    Theme theme = themePreset(theme_id);
+
+    if (theme_id == ThemeId::Custom) {
+        std::vector<std::string> theme_warnings;
+        std::string theme_error;
+        if (!loadTheme("theme.ini", theme, theme_warnings, theme_error)) {
+            std::fprintf(stderr, "theme.ini: %s\n", theme_error.c_str());
+            theme = themePreset(ThemeId::Midnight);
+            theme_id = ThemeId::Midnight;
+        }
+        for (const std::string& warning : theme_warnings) {
+            std::fprintf(stderr, "theme.ini: %s\n", warning.c_str());
+        }
+    }
+
+    // Whatever the source, a theme nobody could read is corrected before
+    // anything is drawn with it. Without this a bad theme.ini would hide the
+    // editor needed to fix it.
+    theme = repairTheme(theme);
+    Theme base_theme = theme;
+
     Metrics metrics;
     metrics.scale = scale;
 
@@ -452,6 +477,15 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
         Smoothed scroll;
         InputMap input;
         input.open();
+
+        ThemeScreen theme_screen;
+
+        // One watcher owns the pad handle and keeps it in step with
+        // hot-plugging. InputMap opens its own handle for navigation; SDL
+        // reference-counts those, so both closing is correct.
+        ControllerWatcher pads;
+        pads.open();
+        bool show_controller = false;
 
         GameViewT<GameEntry> view;
         view.setSource(&games);
@@ -686,6 +720,10 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                                                           : ViewMode::List;
                 dirty = true;
                 break;
+            case kIdTheme:
+                theme_screen.open(theme_id, base_theme);
+                dirty = true;
+                break;
             case kIdSearchField:
                 beginSearch();
                 break;
@@ -763,8 +801,13 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             // loop blocks when nothing is moving. Idle costs nothing and
             // scrolling stays smooth.
             const bool scrolling = scroll.step(dt);
+            // The controller diagram and the theme editor both animate, so
+            // the loop has to keep running while either is up.
             const bool animating = scrolling || state.search_active ||
                                    toasts.active(now_ms) ||
+                                   theme_screen.isOpen() ||
+                                   (show_controller &&
+                                    pads.state().connected) ||
                                    (actions.isScanning && actions.isScanning());
             if (scrolling) dirty = true;
 
@@ -785,6 +828,86 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                     buildWidgets(layout, metrics, text, state, !view.empty());
 
                 do {
+                    // Hot-plugging is noticed whatever is on screen, so the
+                    // diagram and the toasts are never stale.
+                    if (pads.handleEvent(event)) {
+                        if (pads.justConnected()) {
+                            toasts.push(pads.state().name + " connected",
+                                        Toast::Kind::Success, now_ms);
+                            // Showing the diagram answers "did it work?"
+                            // without the user going to look for a screen.
+                            if (!theme_screen.isOpen()) show_controller = true;
+                        }
+                        if (pads.justDisconnected()) {
+                            toasts.push("Controller disconnected",
+                                        Toast::Kind::Error, now_ms);
+                            show_controller = false;
+                        }
+                        pads.acknowledge();
+                        dirty = true;
+                    }
+
+                    // An open overlay owns the keyboard and the mouse. The
+                    // library behind it must not also act on the event, or a
+                    // click meant for the dialog launches a game.
+                    if (theme_screen.isOpen()) {
+                        if (theme_screen.handleEvent(event, layout.window,
+                                                     metrics, scale)) {
+                            dirty = true;
+                        }
+                        if (event.type == SDL_KEYDOWN ||
+                            event.type == SDL_CONTROLLERBUTTONDOWN) {
+                            if (theme_screen.handleAction(
+                                    input.translate(&event))) {
+                                dirty = true;
+                            }
+                        }
+
+                        if (theme_screen.wantsSave()) {
+                            std::string theme_error;
+                            if (saveTheme("theme.ini", theme_screen.preview(),
+                                          theme_error)) {
+                                base_theme =
+                                    repairTheme(theme_screen.preview());
+                                if (actions.setThemeName) {
+                                    actions.setThemeName(themeName(
+                                        theme_screen.selectedPreset()));
+                                }
+                                toasts.push("Theme saved to theme.ini",
+                                            Toast::Kind::Success, now_ms);
+                            } else {
+                                toasts.push(theme_error, Toast::Kind::Error,
+                                            now_ms);
+                            }
+                            theme_screen.acknowledge();
+                            dirty = true;
+                        }
+                        if (theme_screen.wantsReset()) {
+                            base_theme = themePreset(ThemeId::Midnight);
+                            if (actions.setThemeName) {
+                                actions.setThemeName("midnight");
+                            }
+                            theme_screen.acknowledge();
+                            dirty = true;
+                        }
+                        continue;
+                    }
+
+                    if (show_controller) {
+                        // Every pad button has to stay testable, so only the
+                        // keyboard and a click dismiss the diagram.
+                        const bool dismiss =
+                            (event.type == SDL_KEYDOWN &&
+                             !event.key.repeat &&
+                             (event.key.keysym.sym == SDLK_F2 ||
+                              event.key.keysym.sym == SDLK_ESCAPE)) ||
+                            event.type == SDL_MOUSEBUTTONDOWN;
+                        if (dismiss) show_controller = false;
+                        if (event.type == SDL_QUIT) running = false;
+                        dirty = true;
+                        continue;
+                    }
+
                     switch (event.type) {
                     case SDL_QUIT:
                         running = false;
@@ -914,6 +1037,11 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                             }
                             break;
                         }
+                        if (event.key.keysym.sym == SDLK_F2) {
+                            show_controller = true;
+                            dirty = true;
+                            break;
+                        }
                         handleAction(input.translate(&event), layout);
                         break;
 
@@ -949,6 +1077,12 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             }
 
             if (!running) break;
+
+            // Edits are previewed by drawing the whole library in them, and
+            // reverted by simply not doing so once the editor closes.
+            theme = theme_screen.isOpen() ? theme_screen.preview()
+                                          : base_theme;
+
             if (!dirty) continue;
 
             layout = currentLayout();
@@ -1071,11 +1205,32 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                       layout.footer.y + metrics.px(6), theme.text_muted);
             text.draw(renderer, FontRole::Small,
                       "Enter launches   F favorite   G grid   / search   "
-                      "Esc quits",
+                      "F2 controller   Esc quits",
                       layout.footer.x,
                       layout.footer.y + metrics.px(6) +
                           text.lineHeight(FontRole::Small) + metrics.px(2),
                       mix(theme.text_muted, theme.bg, 0.3f));
+
+            if (show_controller) {
+                painter.rect(layout.window, SDL_Color{0, 0, 0, 170});
+                const SDL_Rect panel = inset(layout.window, metrics.px(80));
+                drawPanel(renderer, painter, theme, metrics, panel);
+
+                SDL_Rect diagram = inset(panel, metrics.pad());
+                diagram.h -= metrics.px(26);
+                drawController(renderer, painter, text, theme, metrics,
+                               diagram, pads.state(),
+                               SDL_CONTROLLER_BUTTON_INVALID, now_ms);
+
+                text.drawCentered(
+                    renderer, FontRole::Small,
+                    "Press any control to test it.  F2 or Escape closes.",
+                    {panel.x, panel.y + panel.h - metrics.px(28), panel.w,
+                     metrics.px(20)},
+                    theme.text_muted);
+            }
+
+            theme_screen.draw(renderer, painter, text, metrics, layout.window);
 
             toasts.draw(renderer, painter, text, theme, metrics, layout.window,
                         now_ms);
@@ -1088,6 +1243,7 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
         }
 
         if (state.search_active) SDL_StopTextInput();
+        pads.close();
         input.close();
         chosen = std::move(result);
     }

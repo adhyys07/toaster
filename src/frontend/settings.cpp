@@ -376,7 +376,9 @@ Settings loadSettings() {
             settings.vsync = value == "true" || value == "1";
         } else if (key == "upscaler") {
             settings.upscaler = parseUpscaler(value);
-        } else if (key == "volume") {
+        }  else if (key == "theme") settings.theme = value;
+        else if (key == "input_display") settings.input_display = value == "true";
+        else if (key == "volume") {
             try {
                 settings.volume = std::clamp(std::stoi(value), 0, 100);
             } catch (...) {
@@ -449,6 +451,11 @@ bool saveSettings(const Settings& settings) {
         << "audio_buffer_samples="
         << std::clamp(settings.audio_buffer_samples, 256, 4096) << '\n'
         << "audio_device=" << settings.audio_device << '\n';
+    
+    file << "input_display="
+         << (settings.input_display ? "true" : "false") << '\n';
+    file << "theme=" << (settings.theme.empty() ? "midnight" : settings.theme)
+         << '\n';
 
     for (int i = 0; i < kPadActionCount; ++i) {
         file << "pad_button_" << i << '=' << settings.pad_buttons[i] << '\n';

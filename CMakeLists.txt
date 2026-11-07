@@ -132,7 +132,11 @@ add_executable(emu
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
     systems/ps1/ps1_system.cpp
-    src/frontend/pause_menu.cpp)
+    src/frontend/pause_menu.cpp
+    src/frontend/ui/theme.cpp
+    src/frontend/ui/theme_io.cpp
+    src/frontend/ui/theme_screen.cpp
+    src/frontend/ui/controller_view.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 
@@ -256,6 +260,10 @@ add_executable(ui_tests
     src/frontend/ui/game_view.cpp
     src/frontend/ui/layout.cpp
     src/frontend/ui/text_cache.cpp
+    src/frontend/ui/theme.cpp
+    src/frontend/ui/theme_io.cpp
+    src/frontend/ui/controller_view.cpp
+    src/frontend/ui/painter.cpp
     src/frontend/ui_font.cpp)
 target_include_directories(ui_tests PRIVATE src/frontend)
 

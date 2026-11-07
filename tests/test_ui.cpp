@@ -1,21 +1,17 @@
-// Tests for the parts of the UI layer that are pure logic: fuzzy search,
-// system detection, the layout arithmetic and text ellipsizing. None of these
-// need a window.
-//
-// A failure counter rather than assert(): the default build type is
-// RelWithDebInfo, which defines NDEBUG and compiles assertions out. That is
-// exactly what left every check in test_settings.cpp silently doing nothing.
-
 #define SDL_MAIN_HANDLED
+#include "ui/controller_view.h"
 #include "ui/game_view.h"
 #include "ui/layout.h"
 #include "ui/text_cache.h"
+#include "ui/theme.h"
+#include "ui/theme_io.h"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
 
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -48,7 +44,6 @@ void checkEqual(const std::string& actual, const std::string& expected,
 
 using namespace emu::frontend::ui;
 
-// --- fuzzy search ------------------------------------------------------------
 
 void testFuzzyMatch() {
     int score = 0;
@@ -73,8 +68,6 @@ void testFuzzyMatch() {
     check(fuzzyMatch("super mario bros", "mario", &score),
           "a whole word matches");
 
-    // A title that really starts with the query should outrank one where the
-    // same letters only happen to appear, or search results are useless.
     int leading = 0;
     int scattered = 0;
     check(fuzzyMatch("metroid", "met", &leading), "leading match found");
@@ -83,7 +76,6 @@ void testFuzzyMatch() {
     check(leading > scattered,
           "a leading match outranks a scattered one");
 
-    // Ties break toward the shorter title.
     int shorter = 0;
     int longer = 0;
     check(fuzzyMatch("zelda", "zelda", &shorter), "exact short match found");
@@ -102,7 +94,6 @@ void testFoldCase() {
                "foldCase leaves punctuation and digits alone");
 }
 
-// --- system detection --------------------------------------------------------
 
 void testSystemFromPath() {
     check(systemFromPath("a/b/game.nes") == SystemId::Nes, ".nes is NES");
@@ -116,8 +107,6 @@ void testSystemFromPath() {
     check(systemFromPath("game.bin") == SystemId::Ps1, ".bin is PS1");
     check(systemFromPath("game.cso") == SystemId::Psp, ".cso is PSP");
 
-    // .iso is genuinely ambiguous between PSP and PS2. It resolves to PSP
-    // because that is what the launcher assumes without --ps2.
     check(systemFromPath("game.iso") == SystemId::Psp,
           ".iso resolves to PSP, matching the launcher default");
 
@@ -138,7 +127,6 @@ void testSystemFromPath() {
     }
 }
 
-// --- GameViewT --------------------------------------------------------------
 
 struct FakeGame {
     std::filesystem::path path;
@@ -162,7 +150,6 @@ void testGameView() {
     checkEqual(static_cast<int>(view.size()), 4, "every game is visible");
     check(!view.refresh(), "a second refresh with no change does nothing");
 
-    // Default sort is by title.
     checkEqual(view.at(0).title, "Final Fantasy VII", "sorted by title");
     checkEqual(view.at(3).title, "The Legend of Zelda", "sorted by title");
 
@@ -194,8 +181,6 @@ void testGameView() {
     view.refresh();
     checkEqual(static_cast<int>(view.size()), 4, "clearing the query restores");
 
-    // Mutating the source in place needs an explicit invalidate, because
-    // nothing else can see that it happened.
     games[0].favorite = true;
     check(!view.refresh(), "an in-place change is invisible until invalidated");
     view.invalidate();
@@ -212,7 +197,6 @@ void testGameView() {
     checkEqual(static_cast<int>(view.indexOfPath("games/tetris.gb")), -1,
                "a filtered-out path reports -1");
 
-    // An empty source must not fall over.
     std::vector<FakeGame> empty;
     GameViewT<FakeGame> empty_view;
     empty_view.setSource(&empty);
@@ -222,7 +206,6 @@ void testGameView() {
                "indexOfPath on an empty view reports -1");
 }
 
-// --- layout -----------------------------------------------------------------
 
 bool rectInside(const SDL_Rect& inner, const SDL_Rect& outer) {
     return inner.x >= outer.x && inner.y >= outer.y &&
@@ -253,8 +236,6 @@ void checkNoNegatives(const LibraryLayout& l, const char* context) {
 void testLayout() {
     Metrics metrics;
 
-    // A window far smaller than the design size must still produce a sane
-    // layout. The old menu hard-coded 1000x650 and broke at anything else.
     metrics.scale = 1.0f;
     LibraryLayout tiny = layoutLibrary(320, 240, metrics, ViewMode::List);
     checkNoNegatives(tiny, "320x240");
@@ -288,7 +269,6 @@ void testLayout() {
     check(!overlaps(wide.footer, wide.list_panel),
           "the footer does not overlap the list");
 
-    // A taller window shows more rows. The old menu was fixed at twelve.
     LibraryLayout tall = layoutLibrary(1180, 1080, metrics, ViewMode::List);
     checkNoNegatives(tall, "1180x1080");
     check(tall.visible_rows > wide.visible_rows,
@@ -301,8 +281,6 @@ void testLayout() {
     check(huge.list_panel.w > wide.list_panel.w,
           "the list pane grows with the window");
 
-    // At 200% everything doubles, so a 1180px window is as cramped as a 590px
-    // one and the detail pane goes away.
     metrics.scale = 2.0f;
     LibraryLayout scaled = layoutLibrary(1180, 740, metrics, ViewMode::List);
     checkNoNegatives(scaled, "1180x740 at 2x");
@@ -318,7 +296,6 @@ void testLayout() {
     check(!overlaps(scaled_wide.list_panel, scaled_wide.detail_panel),
           "the panes do not overlap at 2x");
 
-    // Grid mode.
     metrics.scale = 1.0f;
     LibraryLayout grid = layoutLibrary(1180, 740, metrics, ViewMode::Grid);
     checkNoNegatives(grid, "1180x740 grid");
@@ -333,7 +310,6 @@ void testLayout() {
     check(narrow_grid.columns >= 1,
           "even a very narrow window has one column");
 
-    // rowRect and cellRect must agree with the rows region and step evenly.
     const SDL_Rect row0 = rowRect(wide, 0, 0);
     const SDL_Rect row1 = rowRect(wide, 1, 0);
     checkEqual(row1.y - row0.y, wide.row_height, "rows step by row_height");
@@ -356,7 +332,6 @@ void testLayout() {
         check(cell_next_row.y > cell0.y, "the next row is below");
     }
 
-    // A zero-column layout, which List mode produces, must not divide by zero.
     const SDL_Rect none = cellRect(wide, 0, 0);
     check(none.w == 0 && none.h == 0,
           "cellRect on a list layout returns an empty rect");
@@ -375,18 +350,14 @@ void testToRenderCoords() {
     checkEqual(x, 150, "1.5x scales x");
     checkEqual(y, 75, "1.5x scales y");
 
-    // Null arguments are allowed, for callers that only have one axis.
     x = 10;
     toRenderCoords(2.0f, &x, nullptr);
     checkEqual(x, 20, "a null y is ignored");
     toRenderCoords(2.0f, nullptr, nullptr);
 }
 
-// --- ellipsize --------------------------------------------------------------
 
 bool endsMidCodePoint(const std::string& text) {
-    // A UTF-8 string must not end on a continuation byte, and a lead byte
-    // must be followed by the right number of them.
     std::size_t i = 0;
     while (i < text.size()) {
         const unsigned char byte = static_cast<unsigned char>(text[i]);
@@ -408,9 +379,326 @@ bool endsMidCodePoint(const std::string& text) {
     return false;
 }
 
+void testColorParsing() {
+      SDL_Color color{};
+
+      check(parseColor("#5ec8e1", color), "a six-digit hex parses");
+      checkEqual(color.r, 0x5E, "red");
+      checkEqual(color.g, 0xC8, "green");
+      checkEqual(color.b, 0xE1, "blue");
+      checkEqual(color.a, 255, "alpha defaults to opaque");
+
+      check(parseColor("5ec8e1", color), "the hash is optional");
+      check(parseColor("#5EC8E1", color), "upper case parses");
+      checkEqual(color.r, 0x5E, "case does not change the value");
+
+      check(parseColor("#abc", color), "a three-digit hex parses");
+      checkEqual(color.r, 0xAA, "#abc expands each digit");
+      checkEqual(color.b, 0xCC, "#abc expands each digit");
+
+      check(parseColor("#0000007f", color), "an eight-digit hex parses");
+      checkEqual(color.a, 0x7F, "alpha is read");
+
+      check(!parseColor("", color), "an empty string is not a colour");
+      check(!parseColor("#12345", color), "five digits is not a colour");
+      check(!parseColor("#gggggg", color), "non-hex is not a colour");
+      check(!parseColor("blue", color), "a name is not a colour");
+
+      for (int i = 0; i < kThemeFieldCount; ++i) {
+            const Theme theme = themePreset(ThemeId::Nord);
+            const SDL_Color original = theme.*(kThemeFields[i].member);
+            SDL_Color returned{};
+            check(parseColor(formatColor(original), returned),
+              "a formatted colour parses back");
+            check(original.r == returned.r && original.g == returned.g &&
+                  original.b == returned.b && original.a == returned.a,
+              "format and parse round-trip exactly");
+      }
+}
+
+void testThemePresets() {
+    for (int i = 0; i < static_cast<int>(ThemeId::Count); ++i) {
+        const auto id = static_cast<ThemeId>(i);
+        check(themeFromName(themeName(id)) == id,
+              "every preset name round-trips");
+
+        if (id == ThemeId::Custom) continue;
+        const std::vector<ThemeProblem> problems =
+            validateTheme(themePreset(id));
+        for (const ThemeProblem& problem : problems) {
+            std::printf("FAIL  preset %s: %s\n", themeName(id),
+                        problem.message.c_str());
+            ++failures;
+        }
+    }
+
+    check(themeFromName("nonsense") == ThemeId::Midnight,
+          "an unknown name falls back to the default");
+    check(themeFromName("") == ThemeId::Midnight,
+          "an empty name falls back to the default");
+}
+
+void testContrastAndRepair() {
+    const SDL_Color white{255, 255, 255, 255};
+    const SDL_Color black{0, 0, 0, 255};
+
+    check(contrastRatio(white, black) > 20.0f, "black on white is maximal");
+    check(contrastRatio(white, white) < 1.01f, "a colour on itself is 1:1");
+    check(contrastRatio(white, black) == contrastRatio(black, white),
+          "contrast is symmetric");
+
+    Theme broken;
+    broken.bg = black;
+    broken.surface = black;
+    broken.text = black;
+    broken.text_muted = black;
+    broken.border = black;
+    broken.accent = black;
+    broken.text_on_accent = black;
+    broken.gold = black;
+
+    const Theme repaired = repairTheme(broken);
+    check(contrastRatio(repaired.text, repaired.surface) >= 1.6f,
+          "repair makes text legible on a panel");
+    check(contrastRatio(repaired.text, repaired.bg) >= 1.6f,
+          "repair makes text legible on the window");
+    check(contrastRatio(repaired.text_on_accent, repaired.accent) >= 1.6f,
+          "repair makes accent text legible");
+    check(contrastRatio(repaired.border, repaired.surface) > 1.0f,
+          "repair makes borders visible");
+
+    // Repair must leave a good theme completely alone.
+    const Theme good = themePreset(ThemeId::Nord);
+    const Theme untouched = repairTheme(good);
+    check(untouched.text.r == good.text.r && untouched.bg.r == good.bg.r &&
+              untouched.accent.g == good.accent.g,
+          "repair does not alter a legible theme");
+}
+
+void testThemeFile() {
+    const std::filesystem::path path = "test-theme.ini";
+    std::filesystem::remove(path);
+
+    const Theme original = themePreset(ThemeId::Gruvbox);
+    std::string error;
+    check(saveTheme(path, original, error), "a theme writes");
+
+    Theme loaded = themePreset(ThemeId::Midnight);
+    std::vector<std::string> warnings;
+    check(loadTheme(path, loaded, warnings, error), "a theme reads back");
+    check(warnings.empty(), "a theme we wrote loads without warnings");
+    check(loaded.bg.r == original.bg.r && loaded.accent.b == original.accent.b,
+          "the theme survives a round trip");
+
+    // A partial file applies only what it names, so a user can override one
+    // colour without restating the other thirteen.
+    {
+        std::ofstream partial_file("test-theme-partial.ini");
+        partial_file << "# just the accent\naccent=#ff0000\n";
+    }
+    Theme partial = themePreset(ThemeId::Nord);
+    const SDL_Color nord_bg = partial.bg;
+    warnings.clear();
+    check(loadTheme("test-theme-partial.ini", partial, warnings, error),
+          "a partial theme loads");
+    checkEqual(partial.accent.r, 255, "the named colour is applied");
+    checkEqual(partial.bg.r, nord_bg.r, "unnamed colours are left alone");
+
+    // Garbage must be survivable: warn, do not fail.
+    {
+        std::ofstream messy_file("test-theme-messy.ini");
+        messy_file << "accent=#00ff00\n"
+                      "not_a_colour=#123456\n"
+                      "bg=orange\n"
+                      "no equals sign here\n";
+    }
+    Theme messy = themePreset(ThemeId::Midnight);
+    warnings.clear();
+    check(loadTheme("test-theme-messy.ini", messy, warnings, error),
+          "a partly broken theme still loads");
+    checkEqual(messy.accent.g, 255, "the valid line is applied");
+    checkEqual(static_cast<int>(warnings.size()), 3,
+               "each bad line warns exactly once");
+
+    // A file with nothing usable is an error, not a silent no-op: otherwise a
+    // typo in every line looks like a theme that simply did nothing.
+    {
+        std::ofstream empty_file("test-theme-empty.ini");
+        empty_file << "# only a comment\n";
+    }
+    Theme untouched = themePreset(ThemeId::Midnight);
+    warnings.clear();
+    check(!loadTheme("test-theme-empty.ini", untouched, warnings, error),
+          "a theme that sets nothing is an error");
+    check(!error.empty(), "that error says something");
+
+    check(!loadTheme("does-not-exist.ini", untouched, warnings, error),
+          "a missing file is an error");
+
+    for (const char* name : {"test-theme.ini", "test-theme-partial.ini",
+                             "test-theme-messy.ini", "test-theme-empty.ini"}) {
+        std::filesystem::remove(name);
+    }
+}
+
+void testControllerLayout() {
+    const ControllerGeometry g = layoutController({0, 0, 400, 400});
+
+    check(g.body.w > 0 && g.body.h > 0, "the body has a size");
+    // The diagram must keep its proportion rather than stretch to the box.
+    const float ratio = static_cast<float>(g.body.h) / g.body.w;
+    check(ratio > 0.55f && ratio < 0.70f,
+          "the body keeps a controller's proportion in a square box");
+    check(g.body.x >= 0 && g.body.y >= 0, "the body stays inside the bounds");
+
+    const ControllerGeometry wide = layoutController({0, 0, 1000, 200});
+    check(wide.body.h <= 200, "a wide box is limited by its height");
+    check(wide.body.w <= 1000, "a wide box is limited by its width");
+
+    // Every control the diagram draws must resolve to a real rect, or it is
+    // drawn at the origin where nobody will find it.
+    const SDL_GameControllerButton drawn[] = {
+        SDL_CONTROLLER_BUTTON_A,
+        SDL_CONTROLLER_BUTTON_B,
+        SDL_CONTROLLER_BUTTON_X,
+        SDL_CONTROLLER_BUTTON_Y,
+        SDL_CONTROLLER_BUTTON_DPAD_UP,
+        SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+        SDL_CONTROLLER_BUTTON_DPAD_LEFT,
+        SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+        SDL_CONTROLLER_BUTTON_LEFTSHOULDER,
+        SDL_CONTROLLER_BUTTON_RIGHTSHOULDER,
+        SDL_CONTROLLER_BUTTON_LEFTSTICK,
+        SDL_CONTROLLER_BUTTON_RIGHTSTICK,
+        SDL_CONTROLLER_BUTTON_BACK,
+        SDL_CONTROLLER_BUTTON_START,
+        SDL_CONTROLLER_BUTTON_GUIDE};
+
+    for (const SDL_GameControllerButton button : drawn) {
+        const SDL_Rect rect = controllerButtonRect(g, button);
+        if (rect.w <= 0 || rect.h <= 0) {
+            std::printf("FAIL  button %d has no rect\n",
+                        static_cast<int>(button));
+            ++failures;
+        }
+    }
+
+    checkEqual(controllerButtonRect(g, SDL_CONTROLLER_BUTTON_INVALID).w, 0,
+               "an invalid button has no rect");
+
+    // The face buttons must be arranged as a diamond, not stacked.
+    const SDL_Rect a = controllerButtonRect(g, SDL_CONTROLLER_BUTTON_A);
+    const SDL_Rect b = controllerButtonRect(g, SDL_CONTROLLER_BUTTON_B);
+    const SDL_Rect x = controllerButtonRect(g, SDL_CONTROLLER_BUTTON_X);
+    const SDL_Rect y = controllerButtonRect(g, SDL_CONTROLLER_BUTTON_Y);
+    check(a.y > y.y, "A sits below Y");
+    check(b.x > x.x, "B sits right of X");
+
+    // The d-pad arms must not overlap each other.
+    const SDL_Rect up = controllerButtonRect(g, SDL_CONTROLLER_BUTTON_DPAD_UP);
+    const SDL_Rect down =
+        controllerButtonRect(g, SDL_CONTROLLER_BUTTON_DPAD_DOWN);
+    const SDL_Rect left =
+        controllerButtonRect(g, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+    const SDL_Rect right =
+        controllerButtonRect(g, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    check(up.y + up.h <= down.y, "the d-pad arms do not overlap vertically");
+    check(left.x + left.w <= right.x,
+          "the d-pad arms do not overlap horizontally");
+
+    // The two sticks must be distinct controls, not drawn on top of each
+    // other, which a sign error in the layout table would produce.
+    check(g.left_stick.x != g.right_stick.x ||
+              g.left_stick.y != g.right_stick.y,
+          "the sticks are in different places");
+    check(g.left_shoulder.x < g.right_shoulder.x,
+          "the shoulders are the right way round");
+    check(g.left_trigger.y < g.left_shoulder.y,
+          "the triggers sit above the shoulders");
+
+    // No two clusters may touch. Every version of these proportions so far
+    // has had some pair overlapping, and it is invisible until the diagram
+    // is on screen, so it is asserted here.
+    const struct {
+        const char* name;
+        SDL_Rect rect;
+    } clusters[] = {
+        {"left stick", g.left_stick},   {"right stick", g.right_stick},
+        {"d-pad", g.dpad},              {"face buttons", g.face},
+        {"left shoulder", g.left_shoulder},
+        {"right shoulder", g.right_shoulder},
+        {"left trigger", g.left_trigger},
+        {"right trigger", g.right_trigger},
+    };
+    const int cluster_count =
+        static_cast<int>(sizeof(clusters) / sizeof(clusters[0]));
+
+    for (int i = 0; i < cluster_count; ++i) {
+        for (int k = i + 1; k < cluster_count; ++k) {
+            if (overlaps(clusters[i].rect, clusters[k].rect)) {
+                std::printf("FAIL  %s overlaps %s\n", clusters[i].name,
+                            clusters[k].name);
+                ++failures;
+            }
+        }
+    }
+
+    // Everything the diagram draws has to stay inside the rect it was given,
+    // including the triggers, which sit above the body and used to be drawn
+    // over whatever was behind the widget.
+    const SDL_Rect bounds{40, 60, 500, 400};
+    const ControllerGeometry fitted = layoutController(bounds);
+    const SDL_Rect parts[] = {
+        fitted.body,           fitted.left_trigger, fitted.right_trigger,
+        fitted.left_shoulder,  fitted.right_shoulder};
+    for (const SDL_Rect& part : parts) {
+        if (!rectInside(part, bounds)) {
+            std::printf("FAIL  a control escapes the bounds: %d,%d %dx%d\n",
+                        part.x, part.y, part.w, part.h);
+            ++failures;
+        }
+    }
+
+    // The caption is drawn below the body, so there must be room left for it
+    // inside the bounds.
+    check(fitted.body.y + fitted.body.h < bounds.y + bounds.h,
+          "the body leaves room for the caption");
+
+    // A degenerate box must not produce garbage.
+    const ControllerGeometry zero = layoutController({0, 0, 0, 0});
+    check(zero.body.w <= 0 || zero.body.h <= 0,
+          "an empty box yields an empty body");
+}
+
+void testSnapshot() {
+    // readController(nullptr) stands in for "no pad", which is the usual
+    // state on a build machine.
+    const ControllerSnapshot none = readController(nullptr);
+    check(!none.connected, "a null pad is not connected");
+    check(!none.anyInput(), "a null pad reports no input");
+    check(none.name.empty(), "a null pad has no name");
+
+    ControllerSnapshot active;
+    active.connected = true;
+    check(!active.anyInput(), "a resting pad reports no input");
+
+    active.buttons[SDL_CONTROLLER_BUTTON_A] = true;
+    check(active.anyInput(), "a pressed button counts as input");
+
+    active.buttons[SDL_CONTROLLER_BUTTON_A] = false;
+    active.axes[SDL_CONTROLLER_AXIS_LEFTX] = 0.1f;
+    check(!active.anyInput(), "a resting stick is below the dead zone");
+
+    active.axes[SDL_CONTROLLER_AXIS_LEFTX] = 0.8f;
+    check(active.anyInput(), "a deflected stick counts as input");
+
+    // A stick pushed the other way must count too: comparing the raw value
+    // rather than its magnitude would miss half of every axis.
+    active.axes[SDL_CONTROLLER_AXIS_LEFTX] = -0.8f;
+    check(active.anyInput(), "a negatively deflected stick counts as input");
+}
+
 void testEllipsize() {
-    // Needs a real font, which is not guaranteed on a build machine with no
-    // system fonts. Skipping is better than failing for the wrong reason.
     if (TTF_Init() != 0) {
         std::printf("skip  ellipsize: TTF_Init failed: %s\n", TTF_GetError());
         return;
@@ -443,15 +731,10 @@ void testEllipsize() {
     check(text.ellipsize(FontRole::Body, ascii, -10).empty(),
           "a negative budget yields nothing");
 
-    // The real risk: trimming a multi-byte title one byte at a time would
-    // leave a dangling continuation byte and draw a replacement glyph.
     const std::string multibyte =
         "\xC3\x89"              // E with acute
         "l\xC3\xA8ve "          // e with grave
         "\xE2\x98\x85 "         // star
-        // Split before "aise" on purpose: a hex escape consumes every hex
-        // digit that follows it, so "\xA7aise" would be read as the single
-        // out-of-range value 0xA7A rather than 0xA7 then 'a'.
         "Pok\xC3\xA9mon Rouge Feu \xE2\x80\x94 Version Fran\xC3\xA7" "aise";
     check(!endsMidCodePoint(multibyte), "the test string itself is valid");
 
@@ -472,8 +755,6 @@ void testEllipsize() {
         }
     }
 
-    // Caching must not change what is drawn: the same request twice is the
-    // same answer, and the cache should not have grown a second entry.
     checkEqual(text.ellipsize(FontRole::Body, ascii, full / 2), trimmed,
                "ellipsize is deterministic");
 
@@ -491,6 +772,13 @@ int main() {
     testLayout();
     testToRenderCoords();
     testEllipsize();
+    testColorParsing();
+    testThemePresets();
+    testContrastAndRepair();
+    testThemeFile();
+    testControllerLayout();
+    testSnapshot();
+
 
     if (failures == 0) {
         std::printf("ui: all checks passed\n");

@@ -40,7 +40,10 @@
 #include "sha256.h"
 #include "save_state_manager.h"
 #include "game_entry.h"
+#include "ui/controller_view.h"
+#include "ui/layout.h"
 #include "ui/library_screen.h"
+#include "ui/theme_io.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -685,6 +688,13 @@ std::string showGameMenu(const fs::path& folder,
     actions.setFavorite = setFavorite;
     actions.markPlayed = markPlayed;
     actions.browseForGame = [] { return chooseRomFile(); };
+    actions.themeName = [&] { return settings.theme; };
+    actions.setThemeName = [&](const std::string& name) {
+        settings.theme = name;
+        if (!saveSettings(settings)) {
+            std::fprintf(stderr, "Could not save settings.ini\n");
+        }
+    };
     actions.openSettings = [&] { showSettingsMenu(settings, font); };
     actions.installPs1Bios = [&] {
         importBios(emu::frontend::BiosSystem::Ps1, system_directory);
@@ -1028,6 +1038,48 @@ int runGenericGame(const std::string& rom_path,
             return EXIT_FAILURE;
         }
     }
+
+    // The input display needs the UI layer's painter and font cache, which
+    // cost four font opens, so they are built only if it is actually on. It
+    // also only works on the SDL renderer paths: FSR and CRT present through
+    // OpenGL and never touch this renderer.
+    std::unique_ptr<emu::frontend::ui::Painter> hud_painter;
+    std::unique_ptr<emu::frontend::ui::TextCache> hud_text;
+    emu::frontend::ui::Theme hud_theme;
+    emu::frontend::ui::Metrics hud_metrics;
+    bool hud_attempted = false;
+
+    const auto inputDisplayReady = [&] {
+        if (!settings.input_display || !renderer) return false;
+        if (hud_attempted) return hud_text != nullptr;
+        hud_attempted = true;
+
+        if (TTF_WasInit() == 0) {
+            if (TTF_Init() != 0) {
+                std::fprintf(stderr, "SDL_ttf: %s\n", TTF_GetError());
+                return false;
+            }
+            ttf_initialized_here = true;
+        }
+
+        hud_metrics.scale =
+            emu::frontend::ui::displayScale(window, renderer);
+        hud_theme = emu::frontend::ui::repairTheme(
+            emu::frontend::ui::themePreset(
+                emu::frontend::ui::themeFromName(settings.theme)));
+
+        auto cache = std::make_unique<emu::frontend::ui::TextCache>();
+        std::string hud_error;
+        if (!cache->open(hud_metrics.scale, hud_error)) {
+            std::fprintf(stderr, "Input display unavailable: %s\n",
+                         hud_error.c_str());
+            return false;
+        }
+        hud_text = std::move(cache);
+        hud_painter =
+            std::make_unique<emu::frontend::ui::Painter>(renderer);
+        return true;
+    };
 
     int texture_width = 0;
     int texture_height = 0;
@@ -1452,6 +1504,16 @@ int runGenericGame(const std::string& rom_path,
                 }
             }
 
+            // Read straight from the pad rather than from the joypad
+            // state the core sees, so the display shows what the hardware is
+            // doing even when a binding is wrong.
+            if (inputDisplayReady()) {
+                emu::frontend::ui::drawInputDisplay(
+                    renderer, *hud_painter, *hud_text, hud_theme, hud_metrics,
+                    SDL_Rect{0, 0, window_width, window_height},
+                    emu::frontend::ui::readController(gamepads[0]), 255);
+            }
+
             SDL_RenderPresent(renderer);
         }
 
@@ -1501,6 +1563,10 @@ int runGenericGame(const std::string& rom_path,
             next_frame = now;
         }
     }
+
+    // Both hold textures from `renderer`, so they go before it does.
+    hud_painter.reset();
+    hud_text.reset();
 
     for (SDL_GameController* gamepad : gamepads) {
         if (gamepad) SDL_GameControllerClose(gamepad);
@@ -1984,6 +2050,8 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         } else if (arg == "--core-server" && i + 1 < argc) {
             core_server_url = argv[++i];
+        } else if (arg == "--input-display") {
+            settings.input_display = true;
         } else if (arg == "--core-server-unverified") {
             core_server_verify = false;
         } else if (arg == "--core-server") {

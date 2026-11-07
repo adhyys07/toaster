@@ -2,8 +2,9 @@
 
 #include <SDL.h>
 
-namespace emu::frontend::ui
-{
+#include <string>
+
+namespace emu::frontend::ui {
 
 struct Theme {
     SDL_Color bg{11, 15, 23, 255};
@@ -22,8 +23,7 @@ struct Theme {
     SDL_Color shadow{0, 0, 0, 110};
 };
 
-struct Metrics
-{
+struct Metrics {
     float scale = 1.0f;
 
     int px(int design_pixels) const {
@@ -32,7 +32,6 @@ struct Metrics
 
     int pad() const { return px(18); }
     int gap() const { return px(14); }
-    // Panels and grid cells. radius_small() is for buttons, chips and rows.
     int radius() const { return px(10); }
     int radius_small() const { return px(6); }
     int border() const { return px(1) > 0 ? px(1) : 1; }
@@ -45,5 +44,31 @@ struct Metrics
     int scrollbar_width() const { return px(6); }
 };
 
+
+enum class ThemeId {
+    Midnight,     
+    Slate,
+    Nord,
+    Gruvbox,
+    Paper,        
+    Contrast,     
+    Custom,       
+    Count
+};
+
+const char* themeName(ThemeId id);
+
+ThemeId themeFromName(const std::string& name);
+
+Theme themePreset(ThemeId id);
+
+struct ThemeField {
+    const char* key;
+    SDL_Color Theme::* member;
+    const char* label;        // shown in the editor
+};
+
+extern const ThemeField kThemeFields[];
+extern const int kThemeFieldCount;
 
 } // namespace emu::frontend::ui
