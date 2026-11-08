@@ -51,3 +51,6 @@ compiler.log
 # Screenshots and cheats produced at runtime
 /screenshots/
 /cheats/
+
+
+build-release/

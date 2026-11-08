@@ -10,8 +10,6 @@ namespace {
 
 int g_failures = 0;
 
-// Deliberately not assert(): the default build defines NDEBUG, which would
-// compile every check away and leave the test passing without testing.
 void check(bool ok, const char* what) {
     std::printf("  [%s] %s\n", ok ? "PASS" : "FAIL", what);
     std::fflush(stdout);
@@ -26,11 +24,6 @@ int main() {
 
     std::printf("per-game settings\n");
 
-    // Every key is marked present, which is what a caller that really does
-    // want to override all seven does. saveGameSettings only writes the keys
-    // whose present flag is set - it used to write all seven unconditionally,
-    // so overriding one pinned the other six to whatever the globals happened
-    // to be at the time.
     emu::frontend::GameSettings settings;
     settings.scale = 4;
     settings.integer_scale = false;
@@ -66,9 +59,6 @@ int main() {
               loaded.present.fast_forward_speed,
           "a full file marks every key present");
 
-    // One override must write one key. The overlay's "This game" page can set
-    // a single flag, and pinning the other six would be a silent global
-    // settings reset on the next launch.
     {
         emu::frontend::GameSettings single;
         single.show_fps = true;

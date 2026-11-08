@@ -82,9 +82,6 @@ int runPs2Game(const std::string& core_path,
         return 1;
     }
 
-    // LRPS2 can treat an absolute Windows ELF path as relative to its ELF
-    // directory. Run with the game's directory as CWD and give the core only
-    // the filename so its own path resolution stays inside that directory.
     std::error_code cwd_error;
     const fs::path original_directory = fs::current_path(cwd_error);
     if (cwd_error) {

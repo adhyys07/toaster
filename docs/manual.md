@@ -2,12 +2,12 @@
 
 The full reference. [The README](../README.md) is the short version.
 
-Toaster runs NES, Game Boy and CHIP-8 on built-in cores, and PlayStation 1,
+Toaster runs NES, Game Boy and CHIP-8, WASM4 on built-in cores, and PlayStation 1,
 PSP and PlayStation 2 through external Libretro cores.
 
 ## Build
 
-Needs CMake, Ninja, a C++17 compiler, Python 3, SDL2, SDL2_ttf, SDL2_image and
+Needs CMake, Ninja, a C++23 compiler, Python 3, SDL2, SDL2_ttf, SDL2_image and
 libcurl.
 
 ```bash
@@ -44,6 +44,7 @@ build/emu.exe --ps1 "/path/to/game.cue" --system-dir "/path/to/system"
 build/emu.exe --ps2 "/path/to/game.iso" --system-dir "/path/to/system"
 build/emu.exe "/path/to/game.iso" --system-dir "/path/to/system"   # PSP
 ```
+<b>Note: The method above is only when if you want to run the game through CLI otherwise there is an option internally to run the game via GUI method </b>
 
 Install your own legally dumped BIOS and assets under the system directory:
 
@@ -139,7 +140,7 @@ They load automatically, and F9 toggles them during play.
 
 ## Core installer
 
-The library can download PS1, PSP and PS2 cores from an HTTPS server. Cores
+The library can download PS1, PSP and PS2 cores from officaial toaster HTTPS server. You can find the repo for the server <a href="https://github.com/adhyys07/toaster-core">here</a>. Also you can download it manually from the repo and then import it manually in case the HTTPS server doesn't work. Cores
 run as native code, so every download is checked against a `manifest.txt` of
 SHA-256 checksums, and anything that does not match is rejected and deleted.
 Without a manifest Toaster installs nothing.

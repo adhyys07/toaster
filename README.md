@@ -4,7 +4,7 @@ A retro-game emulator that runs six consoles in a single window.
 
 Most emulators handle a single system, so playing across a collection means
 installing, configuring and learning several separate programs. Toaster compiles
-NES, Game Boy (along with color), CHIP-8, PlayStation 1, WASM4, PSP and PlayStation 2 on one window, one settings screen and one set of controls.
+NES, Game Boy (along with Game Boy Color), CHIP-8, PlayStation 1, WASM4, PSP and PlayStation 2 on one window, one settings screen and one set of controls.
 
 ## In-Action
 ![Alt text describing the image](https://cdn.hackclub.com/01a1bcb6-50fb-7e85-bd23-42e3a5dd33a4/Screenshot%202026-11-09%20012005.jpg)
@@ -44,7 +44,7 @@ Press **F1** during a game for the pause menu: saves, settings, controls,
 cheats and themes all live there.
 
 
-## Why I built it
+## Why I built this project
 
 I got tired of installing a separate emulator for every console just to play
 one more favourite game. Toaster puts six of them in one place so that I can enjoy most of my games in a single window.
