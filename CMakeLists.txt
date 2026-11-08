@@ -47,7 +47,8 @@ add_library(emu_core
     systems/gb/apu.cpp
     systems/wasm4/wasm4.cpp
     systems/wasm4/wasm4_system.cpp
-    systems/wasm4/wasm3_runtime.cpp)
+    systems/wasm4/wasm3_runtime.cpp
+    src/frontend/save_backup.cpp)
 target_include_directories(emu_core PUBLIC src systems/nes systems/chip8 systems/gb)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -156,7 +157,9 @@ add_executable(emu
     src/frontend/link_cable.cpp
     src/frontend/ui/big_picture.cpp
     src/frontend/audio_sync.cpp
-    src/frontend/save_backup.cpp
+    # save_backup.cpp lives in emu_core now: game_boy_system.cpp (in
+    # emu_core) needs rotateBackups for its destructor, so it moved there
+    # rather than being compiled twice.
     src/frontend/save_file.cpp
     src/frontend/log_buffer.cpp)
 # Resolved here rather than right after project(): target_include_directories
@@ -323,9 +326,13 @@ add_executable(ui_tests
     src/frontend/hotkeys.cpp
     src/frontend/settings.cpp
     src/frontend/save_state_manager.cpp
+    src/frontend/save_file.cpp
+    src/frontend/save_backup.cpp
+    src/frontend/log_buffer.cpp
     src/frontend/ui_font.cpp)
 target_include_directories(ui_tests PRIVATE systems/psp)
 target_include_directories(ui_tests PRIVATE src/frontend)
+target_include_directories(ui_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 if(TARGET SDL2::SDL2)
     target_link_libraries(ui_tests PRIVATE SDL2::SDL2)

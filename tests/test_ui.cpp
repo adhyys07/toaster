@@ -143,6 +143,8 @@ struct FakeGame {
     // GameViewT reads this for the Recent filter and the LastPlayed sort, so
     // the stand-in has to carry it too.
     long long last_played = 0;
+    // And this for the Playable filter; 0 is Compat::Unknown.
+    int compat = 0;
 };
 
 void testGameView() {

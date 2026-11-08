@@ -391,3 +391,36 @@ def test_play_time_rejects_an_impossible_session(client, games_folder):
 def test_play_time_for_an_unknown_game_is_404(client):
     assert client.post("/games/999/playtime",
                        json={"seconds": 60}).status_code == 404
+
+
+def test_compat_starts_unknown(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game = client.get("/games").json()[0]
+    assert game["compat"] == 0
+
+
+def test_compat_round_trips(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    response = client.put(f"/games/{game_id}/compat", json={"compat": 5})
+    assert response.status_code == 200
+    assert response.json()["compat"] == 5
+
+    game = client.get(f"/games/{game_id}").json()
+    assert game["compat"] == 5
+
+
+def test_compat_rejects_out_of_range_values(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    assert client.put(f"/games/{game_id}/compat",
+                      json={"compat": 6}).status_code == 422
+    assert client.put(f"/games/{game_id}/compat",
+                      json={"compat": -1}).status_code == 422
+
+
+def test_compat_for_an_unknown_game_is_404(client):
+    assert client.put("/games/999/compat",
+                      json={"compat": 3}).status_code == 404
