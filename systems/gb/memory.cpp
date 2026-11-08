@@ -35,6 +35,17 @@ void Memory::reset() {
     serial_data_ = 0;
     serial_control_ = 0;
     serial_output_.clear();
+
+    vram_bank_ = 0;
+    wram_bank_ = 1;
+    bg_palette_index_ = 0;
+    obj_palette_index_ = 0;
+    key1_ = 0;
+    double_speed_ = false;
+    // White rather than zero, so a game that enables the LCD before
+    // uploading a palette shows a blank screen, not a black one.
+    bg_palette_.fill(0xFF);
+    obj_palette_.fill(0xFF);
 }
 
 uint8_t Memory::joypad() const {
@@ -107,20 +118,30 @@ uint8_t Memory::readRaw(uint16_t address) {
     }
 
     if (address < 0xA000) {
-        return vram_[address - 0x8000];
+        return vram_[(address - 0x8000) +
+                     static_cast<std::size_t>(vram_bank_) * 0x2000];
     }
 
     if (address < 0xC000) {
         return cartridge_ ? cartridge_->read(address) : 0xFF;
     }
 
-    if (address < 0xE000) {
+    if (address < 0xD000) {
         return wram_[address - 0xC000];
     }
 
+    if (address < 0xE000) {
+        // Banks 1-7 live here. Bank 0 is not selectable, so a written
+        // 0 reads back as bank 1.
+        const unsigned bank = wram_bank_ == 0 ? 1u : wram_bank_;
+        return wram_[(address - 0xD000) + bank * 0x1000];
+    }
+
     if (address < 0xFE00) {
-        // Echo RAM mirrors C000-DDFF.
-        return wram_[address - 0xE000];
+        // Echo RAM mirrors C000-DDFF, banking included. It re-enters
+        // readRaw rather than read, because this path is also what the
+        // memory scanner uses and must stay free of cheat patches.
+        return readRaw(static_cast<uint16_t>(address - 0x2000));
     }
 
     if (address < 0xFEA0) {
@@ -148,6 +169,20 @@ uint8_t Memory::readRaw(uint16_t address) {
         return ppu_ ? ppu_->read(address) : 0xFF;
     }
 
+    // CGB registers. On a DMG cartridge they read as unconnected, so a
+    // DMG game cannot accidentally observe colour hardware.
+    if (address == 0xFF4F) return color_ ? (0xFE | vram_bank_) : 0xFF;
+    if (address == 0xFF70) return color_ ? (0xF8 | wram_bank_) : 0xFF;
+    if (address == 0xFF4D) {
+        if (!color_) return 0xFF;
+        return static_cast<uint8_t>((double_speed_ ? 0x80 : 0x00) |
+                                    (key1_ & 0x01) | 0x7E);
+    }
+    if (address == 0xFF68) return bg_palette_index_;
+    if (address == 0xFF69) return bg_palette_[bg_palette_index_ & 0x3F];
+    if (address == 0xFF6A) return obj_palette_index_;
+    if (address == 0xFF6B) return obj_palette_[obj_palette_index_ & 0x3F];
+
     if (address >= 0xFF80 && address < 0xFFFF) {
         return hram_[address - 0xFF80];
     }
@@ -166,7 +201,8 @@ void Memory::write(uint16_t address, uint8_t value) {
     }
 
     if (address < 0xA000) {
-        vram_[address - 0x8000] = value;
+        vram_[(address - 0x8000) +
+              static_cast<std::size_t>(vram_bank_) * 0x2000] = value;
         return;
     }
 
@@ -175,13 +211,19 @@ void Memory::write(uint16_t address, uint8_t value) {
         return;
     }
 
-    if (address < 0xE000) {
+    if (address < 0xD000) {
         wram_[address - 0xC000] = value;
         return;
     }
 
+    if (address < 0xE000) {
+        const unsigned bank = wram_bank_ == 0 ? 1u : wram_bank_;
+        wram_[(address - 0xD000) + bank * 0x1000] = value;
+        return;
+    }
+
     if (address < 0xFE00) {
-        wram_[address - 0xE000] = value;
+        write(static_cast<uint16_t>(address - 0x2000), value);
         return;
     }
 
@@ -242,6 +284,41 @@ void Memory::write(uint16_t address, uint8_t value) {
 
     if (address >= 0xFF40 && address <= 0xFF4B) {
         if (ppu_) ppu_->write(address, value);
+        return;
+    }
+
+    if (address == 0xFF4F) {                  // VBK
+        if (color_) vram_bank_ = value & 0x01;
+        return;
+    }
+    if (address == 0xFF70) {                  // SVBK
+        if (color_) wram_bank_ = value & 0x07;
+        return;
+    }
+    if (address == 0xFF4D) {                  // KEY1
+        // Writing bit 0 only arms the switch; the CPU performs it on
+        // the next STOP, which is where double_speed_ actually flips.
+        if (color_) key1_ = (key1_ & 0x80) | (value & 0x01);
+        return;
+    }
+    if (address == 0xFF68) { bg_palette_index_ = value; return; }
+    if (address == 0xFF69) {
+        bg_palette_[bg_palette_index_ & 0x3F] = value;
+        // Bit 7 auto-increments, which is how a game uploads a whole
+        // palette through a single port.
+        if (bg_palette_index_ & 0x80) {
+            bg_palette_index_ =
+                static_cast<uint8_t>(0x80 | ((bg_palette_index_ + 1) & 0x3F));
+        }
+        return;
+    }
+    if (address == 0xFF6A) { obj_palette_index_ = value; return; }
+    if (address == 0xFF6B) {
+        obj_palette_[obj_palette_index_ & 0x3F] = value;
+        if (obj_palette_index_ & 0x80) {
+            obj_palette_index_ =
+                static_cast<uint8_t>(0x80 | ((obj_palette_index_ + 1) & 0x3F));
+        }
         return;
     }
 

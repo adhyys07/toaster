@@ -418,6 +418,13 @@ void CPU::executeOpcode(uint8_t opcode) {
 
     case 0x10:  // STOP
         fetch8();
+        // STOP with a speed switch armed is how a CGB game changes clock.
+        // Without the switch it is a real halt, which is DMG behaviour.
+        if (memory_.speedSwitchArmed()) {
+            memory_.setDoubleSpeed(!memory_.doubleSpeed());
+            memory_.clearSpeedSwitch();
+            return;
+        }
         stopped_ = true;
         return;
 

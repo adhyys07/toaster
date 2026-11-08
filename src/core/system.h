@@ -27,6 +27,13 @@ struct MemoryPatch {
     uint8_t  compare = 0;
 };
 
+struct Overscan {
+    int top = 0;
+    int bottom = 0;
+    int left = 0;
+    int right = 0;
+};
+
 class System {
 public:
     virtual ~System() = default;
@@ -62,6 +69,8 @@ public:
     virtual VideoFrame video() const = 0;
     virtual double refreshRate() const = 0;
 
+    virtual Overscan overscan() const { return {}; }
+
     virtual double aspectRatio() const {
         const VideoFrame f = video();
         return f.height > 0 ? static_cast<double>(f.width) / f.height : 1.0;
@@ -70,6 +79,17 @@ public:
     virtual int sampleRate() const = 0;
 
     virtual size_t readAudio(float* out, size_t frames) = 0;
+
+    virtual int audioChannelCount() const { return 0; }
+
+    virtual const char* audioChannelName(int index) const {
+        (void)index;
+        return "";
+    }
+
+    virtual void setAudioChannelMask(uint32_t mask) { (void)mask; }
+    virtual uint32_t audioChannelMask() const { return 0; }
+
 
     virtual bool setPalette(const uint32_t* entries, int count) {
         (void)entries;

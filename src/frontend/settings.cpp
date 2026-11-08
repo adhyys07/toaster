@@ -484,6 +484,28 @@ Settings loadSettings() {
                 value == "true" || value == "1";
         } else if (key == "palette") {
             settings.palette = value;
+        } else if (key == "slow_motion_divisor") {
+            try {
+                settings.slow_motion_divisor =
+                    std::clamp(std::stoi(value), 2, 8);
+            } catch (...) {
+                settings.slow_motion_divisor = 4;
+            }
+        } else if (key == "audio_channel_mask") {
+            try {
+                settings.audio_channel_mask =
+                    static_cast<uint32_t>(std::stoul(value));
+            } catch (...) {
+                settings.audio_channel_mask = 0xFFFFFFFFu;
+            }
+        } else if (key == "crop_overscan") {
+            settings.crop_overscan = value == "true" || value == "1";
+        } else if (key == "save_backups") {
+            try {
+                settings.save_backups = std::clamp(std::stoi(value), 0, 9);
+            } catch (...) {
+                settings.save_backups = 3;
+            }
         }
     }
 
@@ -516,6 +538,14 @@ bool saveSettings(const Settings& settings) {
     file << "pause_on_focus_loss="
          << (settings.pause_on_focus_loss ? "true" : "false") << '\n';
     file << "palette=" << settings.palette << '\n';
+    file << "slow_motion_divisor="
+         << std::clamp(settings.slow_motion_divisor, 2, 8) << '\n';
+    file << "audio_channel_mask=" << settings.audio_channel_mask
+         << '\n';
+    file << "crop_overscan="
+         << (settings.crop_overscan ? "true" : "false") << '\n';
+    file << "save_backups=" << std::clamp(settings.save_backups, 0, 9)
+         << '\n';
 
     file << "input_display="
          << (settings.input_display ? "true" : "false") << '\n';

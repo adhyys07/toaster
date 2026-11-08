@@ -84,6 +84,11 @@ public:
     VideoFrame video() const override {
         return { bus_.ppu.framebuffer(), nes::kScreenWidth, nes::kScreenHeight };
     }
+
+    Overscan overscan() const override {
+        return {8, 8, 0, 0};
+    }
+
     
     double refreshRate() const override { return 60.0988; }
 
@@ -97,6 +102,23 @@ public:
         audio_.erase(audio_.begin(), audio_.begin() + static_cast<long>(n));
         return n;
     }
+
+    int audioChannelCount() const override { return 4; }
+
+    const char* audioChannelName(int index) const override {
+        static const char* kNames[4] = {"Pulse 1", "Pulse 2", "Triangle",
+                                        "Noise"};
+        return (index >= 0 && index < 4) ? kNames[index] : "";
+    }
+
+    void setAudioChannelMask(uint32_t mask) override {
+        bus_.apu.setChannelMask(static_cast<uint8_t>(mask & 0x0F));
+    }
+
+    uint32_t audioChannelMask() const override {
+        return bus_.apu.channelMask();
+    }
+
  
     int portCount() const override { return 2; }
  
@@ -127,8 +149,6 @@ public:
     int paletteSize() const override { return 64; }
 
     bool setPalette(const uint32_t* entries, int count) override {
-        // A short table would leave part of the NTSC ramp at the previous
-        // scheme, so it is refused rather than partially applied.
         if (!entries || count < 64) return false;
         bus_.ppu.setPalette(entries);
         return true;

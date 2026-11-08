@@ -92,8 +92,6 @@ void printUsage(const char* exe) {
 
 namespace fs = std::filesystem;
 
-// Moved to game_entry.h so the library screen can name it too. The alias
-// keeps every use below unqualified.
 using GameEntry = emu::frontend::GameEntry;
 
 std::string gamePathKey(const fs::path& path) {
@@ -102,9 +100,6 @@ std::string gamePathKey(const fs::path& path) {
     return emu::frontend::libraryPathKey(path);
 }
 
-// Where the hotkey bindings live: one file beside the executable, shared by
-// the library screen and the game loop, so rebinding in one is visible in the
-// other without a restart.
 fs::path hotkeyFile() {
     char* raw = SDL_GetBasePath();
     const fs::path base = raw ? fs::path(raw) : fs::current_path();
@@ -650,10 +645,6 @@ int runGenericGame(const std::string& rom_path,
                    bool resume_requested) {
     std::string error;
 
-    // Per-game overrides from "<rom>.ini". Only keys the file actually
-    // contained are applied: loadGameSettings fills the rest with struct
-    // defaults, so copying those over would reset the global settings on
-    // every launch of a game that has no override for them.
     const emu::frontend::GameSettings game_settings =
         emu::frontend::loadGameSettings(rom_path);
     // The const copy above records what the file said at launch. This one is
@@ -962,6 +953,11 @@ int runGenericGame(const std::string& rom_path,
 
     bool running = true;
     std::vector<float> audio_buffer(4096);
+    system->setAudioChannelMask(settings.audio_channel_mask);
+
+    emu::frontend::AudioSync audio_sync;
+    audio_sync.configure(system->sampleRate(), settings.audio_buffer_samples);
+    std::vector<float> resampled_audio;
     const double refresh = system->refreshRate() > 0.0 ? system->refreshRate() : 60.0;
     const Uint64 performance_frequency = SDL_GetPerformanceFrequency();
     const double target_frame_ticks = static_cast<double>(performance_frequency) / refresh;
@@ -971,6 +967,22 @@ int runGenericGame(const std::string& rom_path,
     bool paused = false;
     bool frame_advance = false;
     bool fast_forward = false;
+    bool slow_motion = false;
+
+    // Captured immediately before a load so one keypress can put back
+    // what the load replaced. One level deep on purpose: a stack of
+    // undos only raises the question of which one you are on.
+    std::vector<uint8_t> undo_state;
+
+    const auto loadSlotWithUndo = [&](int slot) {
+        std::vector<uint8_t> before;
+        const bool captured =
+            system->saveState(before) && !before.empty();
+        if (!loadStateFromSlot(*system, rom_path, slot)) return false;
+        if (captured) undo_state = std::move(before);
+        rewind_buffer.clear();
+        return true;
+    };
 
     const auto toggleFullscreen = [&] {
         const bool is_fullscreen =
@@ -1248,10 +1260,28 @@ int runGenericGame(const std::string& rom_path,
                     saveSlotWithThumbnail(1);
                     break;
                 case HotkeyAction::QuickLoad:
-                    if (loadStateFromSlot(*system, rom_path, 1)) {
-                        rewind_buffer.clear();
-                    } else {
+                    if (!loadSlotWithUndo(1)) {
                         std::fprintf(stderr, "Quick load failed\n");
+                    }
+                    break;
+                case HotkeyAction::SlowMotion:
+                    slow_motion = !slow_motion;
+                    break;
+                case HotkeyAction::UndoLoad:
+                    if (undo_state.empty()) {
+                        notify("Nothing to undo",
+                               emu::frontend::ui::Toast::Kind::Info);
+                    } else if (system->loadState(undo_state)) {
+                        // Cleared, not swapped: undo is a way back from
+                        // an accident, not a second timeline to toggle
+                        // between.
+                        undo_state.clear();
+                        rewind_buffer.clear();
+                        notify("Undid the last load",
+                               emu::frontend::ui::Toast::Kind::Info);
+                    } else {
+                        notify("The core rejected the undo state",
+                               emu::frontend::ui::Toast::Kind::Error);
                     }
                     break;
                 case HotkeyAction::Screenshot: {
@@ -1535,10 +1565,20 @@ int runGenericGame(const std::string& rom_path,
             SDL_RenderClear(renderer);
 
             const emu::VideoFrame frame = system->video();
+            // Presentation only: the framebuffer the core writes is
+            // untouched, so screenshots, save states and achievements
+            // are unaffected by cropping.
+            SDL_Rect source{0, 0, frame.width, frame.height};
+            if (settings.crop_overscan) {
+                const emu::Overscan crop = system->overscan();
+                source = SDL_Rect{crop.left, crop.top,
+                                  frame.width - crop.left - crop.right,
+                                  frame.height - crop.top - crop.bottom};
+            }
             const SDL_Rect viewport = emu::frontend::calculateViewport(
-                window_width, window_height, frame.width, frame.height,
+                window_width, window_height, source.w, source.h,
                 system->aspectRatio(), settings.scaling);
-            SDL_RenderCopy(renderer, texture, nullptr, &viewport);
+            SDL_RenderCopy(renderer, texture, &source, &viewport);
 
             if (wants_overlay && uiReady()) paintOverlays(renderer);
 
@@ -1563,25 +1603,48 @@ int runGenericGame(const std::string& rom_path,
             }
         }
 
-        if (audio) {
-            const size_t count = system->readAudio(audio_buffer.data(), audio_buffer.size());
+                if (audio) {
+            const float* samples = nullptr;
+            size_t count = 0;
+            if (run_ahead.enabled()) {
+                samples = run_ahead_audio.data();
+                count = run_ahead_audio.size();
+            } else {
+                count = system->readAudio(audio_buffer.data(),
+                                          audio_buffer.size());
+                samples = audio_buffer.data();
+            }
+
             if (count > 0) {
+                audio_sync.process(samples, count,
+                                   SDL_GetQueuedAudioSize(audio),
+                                   resampled_audio);
+                if (audio_sync.needsResync()) SDL_ClearQueuedAudio(audio);
+
                 const float gain = settings.mute
                     ? 0.0f
-                    : static_cast<float>(std::clamp(settings.volume, 0, 100)) / 100.0f;
-                for (size_t i = 0; i < count; ++i) {
-                    audio_buffer[i] *= gain;
-                }
-                if (SDL_GetQueuedAudioSize(audio) >
-                    static_cast<Uint32>(system->sampleRate() * sizeof(float) / 4)) {
-                    SDL_ClearQueuedAudio(audio);
-                }
-                SDL_QueueAudio(audio, audio_buffer.data(),
-                               static_cast<Uint32>(count * sizeof(float)));
+                    : static_cast<float>(
+                          std::clamp(settings.volume, 0, 100)) / 100.0f;
+                for (float& sample : resampled_audio) sample *= gain;
+
+                SDL_QueueAudio(audio, resampled_audio.data(),
+                               static_cast<Uint32>(resampled_audio.size() *
+                                                   sizeof(float)));
             }
         }
 
-        const double speed_multiplier = fast_forward ? std::max(1, game_settings.fast_forward_speed) : 1;
+        // Dividing the frame budget by a multiplier below 1 lengthens
+        // each frame, which is slow motion. Fast forward wins when both
+        // are on, because that is the one held deliberately. Audio needs
+        // no special case: AudioSync tracks queue depth, not the clock.
+        double speed_multiplier = 1.0;
+        if (fast_forward) {
+            speed_multiplier =
+                std::max(1, game_settings.fast_forward_speed);
+        } else if (slow_motion) {
+            speed_multiplier =
+                1.0 / std::clamp(settings.slow_motion_divisor, 2, 8);
+        }
         next_frame += target_frame_ticks / speed_multiplier;
         const double now = static_cast<double>(SDL_GetPerformanceCounter());
         if (next_frame > now) {

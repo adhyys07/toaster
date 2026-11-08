@@ -75,9 +75,15 @@ bool Cartridge::load(const std::string& path, std::string& error) {
 
     title_.clear();
 
-    for (size_t i = 0x134; i <= 0x143 && rom_[i] != 0; ++i) {
+    // 0x134-0x142, because 0x143 is the colour flag rather than text: the
+    // old inclusive bound ate it as a title character on CGB cartridges.
+    for (size_t i = 0x134; i <= 0x142 && rom_[i] != 0; ++i) {
         title_.push_back(static_cast<char>(rom_[i]));
     }
+
+    // Bit 7 of 0x0143 means the cartridge drives CGB hardware: 0xC0 is
+    // CGB-only, 0x80 is CGB-enhanced but DMG-compatible. Both get colour.
+    color_ = rom_.size() > 0x0143 && (rom_[0x0143] & 0x80) != 0;
 
     const uint8_t cartridge_type = rom_[0x147];
     const uint8_t rom_size_code = rom_[0x148];

@@ -36,7 +36,15 @@ public:
         visit.block(registers_.data(), registers_.size());
     }
 
+    void setChannelMask(uint8_t mask) { channel_mask_ = mask; }
+    uint8_t channelMask() const { return channel_mask_; }
+    
+
 private:
+    // Bit per channel, low bit first. Not in visitState: a save state
+    // must not carry the player's mixer settings back with it.
+    uint8_t channel_mask_ = 0x0F;
+
     struct Square {
         bool enabled = false;
         bool dac_on = false;
@@ -56,8 +64,10 @@ private:
         bool sweep_negate = false;
         uint8_t sweep_period = 0;
         uint8_t sweep_timer = 0;
+        uint8_t channel_mask_ = 0x0F;
         uint8_t sweep_shift = 0;
         uint16_t sweep_shadow = 0;
+        
 
         void clockTimer();
         void clockLength();

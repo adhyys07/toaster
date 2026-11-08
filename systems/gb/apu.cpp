@@ -266,7 +266,10 @@ float APU::mix() const {
     if (!power_) return 0.0f;
 
     const int channels[4] = {
-        square1_.output(), square2_.output(), wave_.output(), noise_.output()
+        (channel_mask_ & 0x01) ? square1_.output() : 0,
+        (channel_mask_ & 0x02) ? square2_.output() : 0,
+        (channel_mask_ & 0x04) ? wave_.output() : 0,
+        (channel_mask_ & 0x08) ? noise_.output() : 0,
     };
 
     // Each channel contributes 0..15 to whichever side NR51 routes it to.
@@ -284,6 +287,7 @@ float APU::mix() const {
     constexpr float kScale = 1.0f / (4 * 15 * 8);
     return static_cast<float>(left + right) * 0.5f * kScale;
 }
+
 
 void APU::tick(unsigned cycles) {
     for (unsigned i = 0; i < cycles; ++i) {

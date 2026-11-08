@@ -1165,8 +1165,6 @@ private:
             SDL_GL_GetDrawableSize(window_, &drawable_width_, &drawable_height_);
             using ViewportFn = void (APIENTRY *)(GLint, GLint, GLsizei, GLsizei);
             const auto viewport = reinterpret_cast<ViewportFn>(SDL_GL_GetProcAddress("glViewport"));
-            // The core renders into the libretro FBO, whose dimensions are
-            // the core's maximum geometry, not the window's drawable size.
             if (bind_framebuffer_) bind_framebuffer_(GL_FRAMEBUFFER, framebuffer_);
             if (viewport) {
                 viewport(0, 0, static_cast<GLsizei>(framebuffer_width_),

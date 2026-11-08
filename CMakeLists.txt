@@ -42,7 +42,9 @@ add_library(emu_core
     systems/gb/memory.cpp
     systems/gb/cpu.cpp
     systems/gb/ppu.cpp
-    systems/gb/apu.cpp)
+    systems/gb/apu.cpp
+    systems/wasm4/wasm4.cpp
+    systems/wasm4/wasm4_system.cpp)
 target_include_directories(emu_core PUBLIC src systems/nes systems/chip8 systems/gb)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -148,7 +150,9 @@ add_executable(emu
     src/frontend/save_sync.cpp
     src/frontend/discord_presence.cpp
     src/frontend/link_cable.cpp
-    src/frontend/ui/big_picture.cpp)
+    src/frontend/ui/big_picture.cpp
+    src/frontend/audio_sync.cpp
+    src/frontend/save_backup.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 

@@ -36,7 +36,11 @@ public:
         }
     }
 
-    const char* name() const override { return "GAME BOY"; }
+    const char* name() const override {
+        // Reported per ROM, so the library, palettes and achievements all
+        // treat the two as different systems - which they are.
+        return color_ ? "GAME BOY COLOR" : "GAME BOY";
+    }
 
     std::string romInfo() const override {
         if (!cartridge_.loaded()) return {};
@@ -49,6 +53,12 @@ public:
         if (!cartridge_.load(path, error)) {
             return false;
         }
+
+        const bool color = cartridge_.isColor();
+        memory_.setColorMode(color);
+        ppu_.setColorMode(color);
+        color_ = color;
+
 
         reset();
         if (!cartridge_.loadBattery(path)) {
@@ -75,8 +85,13 @@ public:
         // Normally the PPU entering vblank ends the frame. The cycle cap is a
         // backstop for a ROM that switches the LCD off, where the controller
         // never reaches vblank at all.
+        // In double-speed mode the CPU runs twice as fast while the PPU
+        // does not, so a frame is the same wall time but twice the cycles.
+        const unsigned budget =
+            memory_.doubleSpeed() ? kCyclesPerFrame * 2 : kCyclesPerFrame;
+
         unsigned cycles = 0;
-        while (!ppu_.frameComplete() && cycles < kCyclesPerFrame) {
+        while (!ppu_.frameComplete() && cycles < budget) {
             const unsigned executed = cpu_.step();
             cycles += executed > 0 ? executed : 4;
         }
@@ -143,7 +158,25 @@ public:
                 {"HRAM", 0xFF80, 0x007F}};
     }
 
-    int paletteSize() const override { return 4; }
+    // A CGB game supplies its own colours, so offering a DMG palette
+    // would be wrong rather than merely useless.
+    int paletteSize() const override { return color_ ? 0 : 4; }
+
+    int audioChannelCount() const override { return 4; }
+
+    const char* audioChannelName(int index) const override {
+        static const char* kNames[4] = {"Square 1", "Square 2", "Wave",
+                                        "Noise"};
+        return (index >= 0 && index < 4) ? kNames[index] : "";
+    }
+
+    void setAudioChannelMask(uint32_t mask) override {
+        apu_.setChannelMask(static_cast<uint8_t>(mask & 0x0F));
+    }
+
+    uint32_t audioChannelMask() const override {
+        return apu_.channelMask();
+    }
 
     bool setPalette(const uint32_t* entries, int count) override {
         // Index 0 is the lightest shade. Fewer than four entries would leave
@@ -250,6 +283,10 @@ private:
     gb::CPU cpu_;
 
     std::string rom_path_;
+
+    // From the cartridge header. Not part of the save state: a state that
+    // forced this would let a DMG ROM load into a CGB-configured core.
+    bool color_ = false;
 
     std::vector<ButtonInfo> buttons_{
         {"A", 1u << 0, "Z"},

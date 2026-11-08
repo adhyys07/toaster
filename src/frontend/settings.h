@@ -55,6 +55,18 @@ struct Settings {
     // paused on purpose.
     bool pause_on_focus_loss = true;
 
+    // How many times slower the slow-motion hotkey runs.
+    int slow_motion_divisor = 4;
+
+    // Bit per audio channel, low bit first. All on by default.
+    uint32_t audio_channel_mask = 0xFFFFFFFFu;
+
+    // Hides the edge rows real hardware kept behind the bezel.
+    bool crop_overscan = false;
+
+    // Rotated copies of each battery save kept against a bad write.
+    int save_backups = 3;
+
     // Name of the colour scheme to hand the core, empty for the core's own.
     // Only cores that report a paletteSize() use it.
     std::string palette;

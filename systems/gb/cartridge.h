@@ -20,6 +20,8 @@ public:
     bool loaded() const { return loaded_; }
     bool hasBattery() const { return battery_; }
 
+    bool isColor() const { return color_; }
+
     // Cartridge RAM persists across runs for battery-backed carts. Both are
     // no-ops for a cart without a battery.
     bool loadBattery(const std::string& rom_path);
@@ -61,6 +63,8 @@ private:
     bool loaded_ = false;
     bool battery_ = false;
     bool has_rtc_ = false;
+
+    bool color_ = false;
 
     bool ram_enabled_ = false;
     // MBC5 reaches 512 banks, so this does not fit in a byte.

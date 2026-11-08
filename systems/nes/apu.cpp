@@ -188,8 +188,20 @@ void APU::clock() {
 }
 
 float APU::output() const {
-    const float pulse_out = 0.00752f * (pulse1_.level() + pulse2_.level());
-    const float tnd_out   = 0.00851f * triangle_.level() + 0.00494f * noise_.level();
+    // Gating the mix, not the channel. Silencing a channel by stopping
+    // its length counter would change the game's timing, and on real
+    // hardware the frame IRQ drives logic some games depend on.
+    const float p1 = (channel_mask_ & 0x01)
+                         ? static_cast<float>(pulse1_.level()) : 0.0f;
+    const float p2 = (channel_mask_ & 0x02)
+                         ? static_cast<float>(pulse2_.level()) : 0.0f;
+    const float tr = (channel_mask_ & 0x04)
+                         ? static_cast<float>(triangle_.level()) : 0.0f;
+    const float no = (channel_mask_ & 0x08)
+                         ? static_cast<float>(noise_.level()) : 0.0f;
+
+    const float pulse_out = 0.00752f * (p1 + p2);
+    const float tnd_out   = 0.00851f * tr + 0.00494f * no;
     return pulse_out + tnd_out;
 }
 

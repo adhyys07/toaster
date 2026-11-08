@@ -49,9 +49,11 @@ public:
         visit.block(framebuffer_.data(),
                     framebuffer_.size() * sizeof(uint32_t));
         visit.block(line_pixels_.data(), line_pixels_.size());
+        visit.block(line_priority_.data(), line_priority_.size());
     }
 
     void setColors(const uint32_t* colors);
+    void setColorMode(bool on) { color_ = on; }
 
 private:
     void step();
@@ -64,6 +66,15 @@ private:
     void startOamDma(uint8_t page);
     uint8_t tilePixel(uint16_t data_base, uint8_t tile, int x, int y,
                       bool signed_index) const;
+    uint8_t tilePixelBanked(uint16_t data_base, uint8_t tile, int x,
+                            int y, bool signed_index, int bank) const;
+
+    // BGR555 as the hardware stores it, to the ARGB the frontend wants.
+    static uint32_t fromBgr555(uint8_t low, uint8_t high);
+
+    // DMG and CGB disagree about sprite priority, so the rule lives in
+    // one place rather than being inlined into renderSprites twice.
+    bool backgroundWins(int x, bool sprite_behind) const;
 
     Memory& memory_;
 
@@ -71,6 +82,9 @@ private:
     // The background/window colour index per pixel of the current line, kept
     // so sprite priority can tell colour 0 from the rest.
     std::array<uint8_t, 160> line_pixels_{};
+    // CGB gives the background an "above sprites" bit per tile, so
+    // sprite priority needs more than the colour-zero test DMG used.
+    std::array<uint8_t, 160> line_priority_{};
 
     uint8_t lcdc_ = 0x91;
     uint8_t stat_ = 0x85;
@@ -84,6 +98,9 @@ private:
     uint8_t obp1_ = 0xFF;
     uint8_t wy_ = 0;
     uint8_t wx_ = 0;
+    // From the cartridge, so it stays out of visitState.
+    bool color_ = false;
+
     uint32_t colors_[4] = {
         0xFFE0F8D0u, 0xFF88C070u, 0xFF346856u, 0xFF081820u
     };

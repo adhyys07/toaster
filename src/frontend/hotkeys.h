@@ -29,6 +29,8 @@ enum class HotkeyAction {
     ToggleInputDisplay,
     RecordMovie,
     PlayMovie,
+    SlowMotion,
+    UndoLoad,
     Reset,
     Quit,
     Count

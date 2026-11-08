@@ -19,6 +19,9 @@ public:
     uint8_t cpuRead(uint16_t addr);
  
     float output() const;
+
+    void setChannelMask(uint8_t mask) { channel_mask_ = mask; }
+    uint8_t channelMask() const { return channel_mask_; }
     bool irq = false;
 
 private:
@@ -96,6 +99,10 @@ private:
     Pulse    pulse1_, pulse2_;
     Triangle triangle_;
     Noise    noise_;
+
+    // Bit per channel, low bit first. Not in visitState: a save state
+    // must not carry the player's mixer settings back with it.
+    uint8_t channel_mask_ = 0x0F;
  
     uint32_t frame_cycle_   = 0;
     bool     five_step_     = false;

@@ -54,8 +54,34 @@ void PPU::reset() {
     frame_complete_ = false;
 }
 
+uint32_t PPU::fromBgr555(uint8_t low, uint8_t high) {
+    const unsigned value =
+        static_cast<unsigned>(low) | (static_cast<unsigned>(high) << 8);
+    // Replicating the high bits rather than shifting keeps full scale at
+    // 255 instead of 248, which would otherwise tint every white grey.
+    const auto expand = [](unsigned c) { return (c << 3) | (c >> 2); };
+    return 0xFF000000u | (expand(value & 0x1F) << 16) |
+           (expand((value >> 5) & 0x1F) << 8) |
+           expand((value >> 10) & 0x1F);
+}
+
+bool PPU::backgroundWins(int x, bool sprite_behind) const {
+    if (!color_) return sprite_behind && line_pixels_[x] != 0;
+
+    // On CGB, LCDC bit 0 is a master priority switch: clear means
+    // sprites draw over everything regardless of either priority bit.
+    if ((lcdc_ & 0x01) == 0) return false;
+    if (line_pixels_[x] == 0) return false;   // colour 0 never blocks
+    return line_priority_[x] != 0 || sprite_behind;
+}
+
 uint8_t PPU::tilePixel(uint16_t data_base, uint8_t tile, int x, int y,
                        bool signed_index) const {
+    return tilePixelBanked(data_base, tile, x, y, signed_index, 0);
+}
+
+uint8_t PPU::tilePixelBanked(uint16_t data_base, uint8_t tile, int x,
+                             int y, bool signed_index, int bank) const {
     // The 0x8800 tile block addresses tiles as signed offsets from 0x9000.
     const int index = signed_index ? static_cast<int8_t>(tile)
                                    : static_cast<int>(tile);
@@ -63,7 +89,7 @@ uint8_t PPU::tilePixel(uint16_t data_base, uint8_t tile, int x, int y,
     const int offset = address - 0x8000;
     if (offset < 0 || offset + 1 >= 0x2000) return 0;
 
-    const uint8_t* vram = memory_.vram();
+    const uint8_t* vram = memory_.vramBank(bank);
     const uint8_t low = vram[offset];
     const uint8_t high = vram[offset + 1];
 
@@ -77,6 +103,7 @@ void PPU::renderBackground() {
         // means it never blocks a sprite.
         for (int x = 0; x < 160; ++x) {
             line_pixels_[x] = 0;
+            line_priority_[x] = 0;
             framebuffer_[ly_ * 160 + x] = colors_[0];
         }
         return;
@@ -93,13 +120,35 @@ void PPU::renderBackground() {
 
     for (int x = 0; x < 160; ++x) {
         const int world_x = (x + scx_) & 0xFF;
-        const uint8_t tile =
-            vram[map_base - 0x8000 + tile_row * 32 + world_x / 8];
+        const uint16_t map_offset = static_cast<uint16_t>(
+            map_base - 0x8000 + tile_row * 32 + world_x / 8);
+        const uint8_t tile = vram[map_offset];
+
+        // On CGB the same address in bank 1 holds the tile attributes:
+        // palette in bits 0-2, tile bank in bit 3, flips in 5-6, and
+        // priority over sprites in bit 7.
+        const uint8_t attributes =
+            color_ ? memory_.vramBank(1)[map_offset] : uint8_t{0};
+        const bool flip_x = (attributes & 0x20) != 0;
+        const bool flip_y = (attributes & 0x40) != 0;
+
+        const int row = flip_y ? 7 - pixel_y : pixel_y;
+        const int col = flip_x ? 7 - (world_x & 7) : (world_x & 7);
+
         const uint8_t pixel =
-            tilePixel(data_base, tile, world_x & 7, pixel_y, signed_index);
+            tilePixelBanked(data_base, tile, col, row, signed_index,
+                            (attributes >> 3) & 1);
 
         line_pixels_[x] = pixel;
-        framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
+        line_priority_[x] = static_cast<uint8_t>((attributes >> 7) & 1);
+
+        if (color_) {
+            const uint8_t* ram = memory_.bgPaletteRam();
+            const int at = (attributes & 0x07) * 8 + pixel * 2;
+            framebuffer_[ly_ * 160 + x] = fromBgr555(ram[at], ram[at + 1]);
+        } else {
+            framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
+        }
     }
 }
 
@@ -120,13 +169,36 @@ void PPU::renderWindow() {
 
     for (int x = std::max(0, window_x); x < 160; ++x) {
         const int window_pixel = x - window_x;
-        const uint8_t tile =
-            vram[map_base - 0x8000 + tile_row * 32 + window_pixel / 8];
-        const uint8_t pixel = tilePixel(data_base, tile, window_pixel & 7,
-                                        pixel_y, signed_index);
+        const uint16_t map_offset = static_cast<uint16_t>(
+            map_base - 0x8000 + tile_row * 32 + window_pixel / 8);
+        const uint8_t tile = vram[map_offset];
+
+        // The window reads the same attribute map as the background, so
+        // the two have to decode it identically or a windowed HUD comes
+        // out in the background palette.
+        const uint8_t attributes =
+            color_ ? memory_.vramBank(1)[map_offset] : uint8_t{0};
+        const bool flip_x = (attributes & 0x20) != 0;
+        const bool flip_y = (attributes & 0x40) != 0;
+
+        const int row = flip_y ? 7 - pixel_y : pixel_y;
+        const int col =
+            flip_x ? 7 - (window_pixel & 7) : (window_pixel & 7);
+
+        const uint8_t pixel =
+            tilePixelBanked(data_base, tile, col, row, signed_index,
+                            (attributes >> 3) & 1);
 
         line_pixels_[x] = pixel;
-        framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
+        line_priority_[x] = static_cast<uint8_t>((attributes >> 7) & 1);
+
+        if (color_) {
+            const uint8_t* ram = memory_.bgPaletteRam();
+            const int at = (attributes & 0x07) * 8 + pixel * 2;
+            framebuffer_[ly_ * 160 + x] = fromBgr555(ram[at], ram[at + 1]);
+        } else {
+            framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
+        }
     }
 
     ++window_line_;
@@ -154,9 +226,10 @@ void PPU::renderSprites() {
 
     // On DMG the smaller X wins, with ties going to the lower OAM index.
     // Drawing in reverse priority lets later writes cover earlier ones.
+    // CGB drops the smaller-X rule entirely: priority is OAM order alone.
     std::stable_sort(visible.begin(), visible.begin() + count,
-                     [](const Candidate& a, const Candidate& b) {
-                         if (a.x != b.x) return a.x > b.x;
+                     [this](const Candidate& a, const Candidate& b) {
+                         if (!color_ && a.x != b.x) return a.x > b.x;
                          return a.index > b.index;
                      });
 
@@ -188,11 +261,21 @@ void PPU::renderSprites() {
             if (x < 0 || x >= 160) continue;
 
             const int source_x = flip_x ? 7 - column : column;
-            const uint8_t pixel = tilePixel(0x8000, tile, source_x, row, false);
+            const uint8_t pixel =
+                tilePixelBanked(0x8000, tile, source_x, row, false,
+                                color_ ? ((attributes >> 3) & 1) : 0);
             if (pixel == 0) continue;                  // colour 0 is clear
-            if (behind_background && line_pixels_[x] != 0) continue;
+            if (backgroundWins(x, behind_background)) continue;
 
-            framebuffer_[ly_ * 160 + x] = colors_[shadeOf(palette, pixel)];
+            if (color_) {
+                const uint8_t* ram = memory_.objPaletteRam();
+                const int at = (attributes & 0x07) * 8 + pixel * 2;
+                framebuffer_[ly_ * 160 + x] =
+                    fromBgr555(ram[at], ram[at + 1]);
+            } else {
+                framebuffer_[ly_ * 160 + x] =
+                    colors_[shadeOf(palette, pixel)];
+            }
         }
     }
 }
