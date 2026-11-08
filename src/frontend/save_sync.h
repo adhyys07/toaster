@@ -1,5 +1,7 @@
 #pragma once
 
+#include "sha256.h"
+
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -33,7 +35,5 @@ public:
 private:
     std::string server_;
 };
-
-std::string sha256File(const std::filesystem::path& file);
 
 } // namespace emu::frontend

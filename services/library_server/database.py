@@ -72,6 +72,19 @@ class GameDatabase:
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS games_system ON games(system)"
         )
+
+        # Save blobs live on disk; this table holds only what is needed
+        # to decide whether a transfer is worth making.
+        self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS saves (
+                game_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                digest TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                modified INTEGER NOT NULL,
+                PRIMARY KEY (game_id, kind)
+            )
+        """)
         self.connection.commit()
 
         # WAL lets a read run while a scan is writing, which is what the
@@ -183,6 +196,48 @@ class GameDatabase:
                 (",".join(normalized), game_id),
             )
         return cursor.rowcount == 1
+
+    def saves_directory(self) -> Path:
+        """Where save blobs are kept, beside the database file."""
+        folder = self.database_path.parent / "saves"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def save_blob_path(self, game_id: int, kind: str) -> Path:
+        # The caller validates `kind` against a whitelist before this
+        # is reached, because it lands in a filename.
+        return self.saves_directory() / f"{game_id}-{kind}.bin"
+
+    def record_save(
+        self, game_id: int, kind: str, digest: str, size: int,
+        modified: int,
+    ) -> bool:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT INTO saves (game_id, kind, digest, size, modified) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(game_id, kind) DO UPDATE SET "
+                "digest = excluded.digest, size = excluded.size, "
+                "modified = excluded.modified",
+                (game_id, kind, digest, size, modified),
+            )
+        return True
+
+    def list_saves(self, game_id: int) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT kind, digest, size, modified FROM saves "
+            "WHERE game_id = ? ORDER BY kind",
+            (game_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_save(self, game_id: int, kind: str):
+        row = self.connection.execute(
+            "SELECT kind, digest, size, modified FROM saves "
+            "WHERE game_id = ? AND kind = ?",
+            (game_id, kind),
+        ).fetchone()
+        return dict(row) if row else None
 
     def statistics(self):
         systems = self.connection.execute("""

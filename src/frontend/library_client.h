@@ -61,6 +61,11 @@ public:
         int game_id,
         std::string& error);
 
+    bool setTags(
+        int game_id,
+        const std::vector<std::string>& tags,
+        std::string& error);
+
     bool getStatistics(
         LibraryStatistics& statistics,
         std::string& error);

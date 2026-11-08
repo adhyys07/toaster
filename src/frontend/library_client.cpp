@@ -229,6 +229,32 @@ bool LibraryClient::markPlayed(int id, std::string& error) {
                    {}, response, error);
 }
 
+bool LibraryClient::setTags(int id, const std::vector<std::string>& tags,
+                            std::string& error) {
+    // Tags come from a text field, so a quote or a backslash in one would
+    // otherwise produce a body the server rejects as malformed.
+    std::string body = "{\"tags\":[";
+    bool first = true;
+    for (const std::string& tag : tags) {
+        if (tag.empty()) continue;
+        if (!first) body += ',';
+        first = false;
+        body += '"';
+        for (const char c : tag) {
+            if (c == '"' || c == '\\') body += '\\';
+            if (static_cast<unsigned char>(c) < 0x20) continue;
+            body += c;
+        }
+        body += '"';
+    }
+    body += "]}";
+
+    std::string response;
+    return request(server_url_, "PUT",
+                   "/games/" + std::to_string(id) + "/tags",
+                   body, response, error);
+}
+
 bool LibraryClient::getStatistics(LibraryStatistics& statistics,
                                   std::string& error) {
     std::string response;

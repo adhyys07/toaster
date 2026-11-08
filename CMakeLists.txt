@@ -142,9 +142,21 @@ add_executable(emu
     src/frontend/hotkeys.cpp
     src/frontend/run_ahead.cpp
     src/frontend/movie.cpp
-    src/frontend/palette_io.cpp)
+    src/frontend/palette_io.cpp
+    src/frontend/memory_scan.cpp
+    src/frontend/achievements.cpp
+    src/frontend/save_sync.cpp
+    src/frontend/discord_presence.cpp
+    src/frontend/link_cable.cpp
+    src/frontend/ui/big_picture.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
+
+# The link cable and the Discord IPC socket use the platform sockets
+# directly; on Windows that means linking Winsock explicitly.
+if(WIN32)
+    target_link_libraries(emu PRIVATE ws2_32)
+endif()
 
 if(MINGW)
     target_link_options(emu PRIVATE -static-libgcc -static-libstdc++)

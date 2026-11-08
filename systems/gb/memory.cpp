@@ -206,12 +206,19 @@ void Memory::write(uint16_t address, uint8_t value) {
 
     if (address == 0xFF02) {
         serial_control_ = value;
-        // Starting a transfer with the internal clock publishes the byte and
-        // completes immediately; nothing is attached to receive it.
+        // Bit 7 starts a transfer, bit 0 selects the internal clock. Only
+        // the clock master drives an exchange; a device on the external
+        // clock waits to be driven.
         if ((value & 0x81) == 0x81) {
             if (serial_output_.size() < 4096) {
                 serial_output_.push_back(static_cast<char>(serial_data_));
             }
+            // A real cable shifts eight bits over eight clock periods.
+            // Exchanging the whole byte at once is accurate enough for
+            // trading and battling, which only care about byte order, and
+            // it avoids running a second clock domain.
+            serial_data_ = serial_exchange_ ? serial_exchange_(serial_data_)
+                                            : 0xFF;
             serial_control_ = static_cast<uint8_t>(value & 0x7F);
             requestInterrupt(0x08);
         }

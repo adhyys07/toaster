@@ -272,3 +272,88 @@ def test_catalog_tolerates_missing_boxart(client, monkeypatch):
     results = client.get("/catalog/search?q=unknown").json()
     assert results[0]["artwork"] is None
     assert results[0]["overview"] == ""
+
+
+def test_saves_start_empty(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    assert client.get(f"/saves/{game_id}").json() == []
+
+
+def test_a_save_round_trips(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    payload = b"battery contents"
+    put = client.put(f"/saves/{game_id}/srm", content=payload)
+    assert put.status_code == 200
+    assert put.json()["size"] == len(payload)
+
+    got = client.get(f"/saves/{game_id}/srm")
+    assert got.status_code == 200
+    assert got.content == payload
+    # The digest the listing reports has to match the bytes served, or the
+    # client's "identical, nothing to do" shortcut would be wrong.
+    assert got.headers["X-Save-Digest"] == put.json()["digest"]
+
+
+def test_a_second_upload_replaces_the_first(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    client.put(f"/saves/{game_id}/state3", content=b"first")
+    client.put(f"/saves/{game_id}/state3", content=b"second")
+
+    assert client.get(f"/saves/{game_id}/state3").content == b"second"
+    listing = client.get(f"/saves/{game_id}").json()
+    assert len(listing) == 1
+    assert listing[0]["size"] == len(b"second")
+
+
+def test_saves_are_listed_per_kind(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    client.put(f"/saves/{game_id}/srm", content=b"a")
+    client.put(f"/saves/{game_id}/state0", content=b"bb")
+
+    kinds = [entry["kind"] for entry in client.get(f"/saves/{game_id}").json()]
+    assert kinds == ["srm", "state0"]
+
+
+def test_an_unknown_save_kind_is_rejected(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    assert client.put(f"/saves/{game_id}/exe", content=b"x").status_code == 400
+    assert client.get(f"/saves/{game_id}/exe").status_code == 400
+
+
+def test_a_traversing_save_kind_cannot_escape_the_folder(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    # The whitelist has to reject this before it ever reaches a filename.
+    assert client.put(
+        f"/saves/{game_id}/..%2f..%2fescaped", content=b"x"
+    ).status_code in (400, 404)
+
+
+def test_an_empty_save_is_rejected(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    assert client.put(f"/saves/{game_id}/srm", content=b"").status_code == 400
+
+
+def test_saves_for_an_unknown_game_are_404(client):
+    assert client.get("/saves/999").status_code == 404
+    assert client.put("/saves/999/srm", content=b"x").status_code == 404
+
+
+def test_a_missing_save_is_404(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    assert client.get(f"/saves/{game_id}/state9").status_code == 404

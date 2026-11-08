@@ -2,6 +2,7 @@
 
 #include "core/system.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -31,7 +32,7 @@ public:
     };
 
     void reset(Width width);
-    Width Width() const { return width_; }
+    Width width() const { return width_; }
     bool first(const System& system);
     bool next(const System& system, Compare compare, uint32_t operand);
 

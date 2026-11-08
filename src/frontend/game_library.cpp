@@ -59,6 +59,19 @@ bool GameLibrary::markPlayed(
     return client_.markPlayed(game.id, error);
 }
 
+bool GameLibrary::setTags(
+    const RemoteGame& game,
+    const std::vector<std::string>& tags,
+    std::string& error) {
+    if (!client_.setTags(game.id, tags, error))
+        return false;
+
+    // Refreshed rather than patched locally: the server normalises tags
+    // (lowercased, trimmed, deduplicated, sorted) and the cached row has
+    // to hold what it stored, not what was sent.
+    return refresh(error);
+}
+
 const std::vector<RemoteGame>& GameLibrary::games() const {
     return games_;
 }

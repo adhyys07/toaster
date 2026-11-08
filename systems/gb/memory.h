@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace emu::gb {
@@ -67,6 +68,16 @@ public:
         visit(serial_control_);
     }
 
+    // Set by the frontend when a link partner is attached. The callback is
+    // handed the byte this Game Boy is shifting out and returns the byte it
+    // receives. Unset means no cable, which is the behaviour above: the
+    // port reads back 0xFF, exactly as it does with nothing plugged in.
+    using SerialExchange = std::function<uint8_t(uint8_t outgoing)>;
+    void setSerialExchange(SerialExchange exchange) {
+        serial_exchange_ = std::move(exchange);
+    }
+    bool linked() const { return static_cast<bool>(serial_exchange_); }
+
     // Blargg's test ROMs report their results over the serial port, so the
     // bytes written there are collected rather than dropped.
     const std::string& serialOutput() const { return serial_output_; }
@@ -96,6 +107,9 @@ private:
     uint8_t serial_data_ = 0;
     uint8_t serial_control_ = 0;
     std::string serial_output_;
+    // Not serialized: a save state must not carry a cable that is no
+    // longer plugged in, and the partner has its own state anyway.
+    SerialExchange serial_exchange_;
 };
 
 } // namespace emu::gb

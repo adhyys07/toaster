@@ -1,7 +1,9 @@
+import hashlib
 import os
+import re
 import time
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from catalog import CatalogUnavailable, search_catalog
@@ -27,6 +29,29 @@ class FavoriteRequest(BaseModel):
 
 class TagsRequest(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=64)
+
+
+# Battery saves and the ten state slots, and nothing else. `kind` lands in
+# a filename, so it is matched against this rather than sanitised: a
+# whitelist cannot be talked out of rejecting "../../etc/passwd".
+SAVE_KIND = re.compile(r"^(srm|sav|state[0-9])$")
+
+# A save that will not fit in memory is not a save; refusing early keeps
+# one bad client from exhausting the server.
+MAX_SAVE_BYTES = 32 * 1024 * 1024
+
+
+def _checked_kind(kind: str) -> str:
+    if not SAVE_KIND.match(kind):
+        raise HTTPException(status_code=400, detail="Unknown save kind")
+    return kind
+
+
+def _checked_game(game_id: int) -> dict:
+    found = database.get_game(game_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Game not found")
+    return found
 
 
 @app.get("/health")
@@ -118,3 +143,55 @@ def tags(game_id: int, request: TagsRequest):
         "success": True,
         "tags": [tag for tag in stored.split(",") if tag],
     }
+
+@app.get("/saves/{game_id}")
+def list_saves(game_id: int):
+    _checked_game(game_id)
+    return database.list_saves(game_id)
+
+
+@app.put("/saves/{game_id}/{kind}")
+async def put_save(game_id: int, kind: str, request: Request):
+    _checked_game(game_id)
+    _checked_kind(kind)
+
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="Empty save")
+    if len(body) > MAX_SAVE_BYTES:
+        raise HTTPException(status_code=413, detail="Save too large")
+
+    target = database.save_blob_path(game_id, kind)
+    # Written beside the target and renamed, so a dropped connection cannot
+    # leave a truncated save where a good one was.
+    staging = target.with_suffix(".part")
+    staging.write_bytes(body)
+    staging.replace(target)
+
+    digest = hashlib.sha256(body).hexdigest()
+    database.record_save(
+        game_id, kind, digest, len(body), int(time.time())
+    )
+    return {
+        "success": True,
+        "kind": kind,
+        "digest": digest,
+        "size": len(body),
+    }
+
+
+@app.get("/saves/{game_id}/{kind}")
+def get_save(game_id: int, kind: str):
+    _checked_game(game_id)
+    _checked_kind(kind)
+
+    record = database.get_save(game_id, kind)
+    path = database.save_blob_path(game_id, kind)
+    if not record or not path.is_file():
+        raise HTTPException(status_code=404, detail="No save of that kind")
+
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/octet-stream",
+        headers={"X-Save-Digest": record["digest"]},
+    )

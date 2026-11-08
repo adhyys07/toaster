@@ -72,7 +72,7 @@ public:
     bool hardcore() const { return hardcore_; }
 
 private:
-    uint32_t read(const System7 system, uint32_t address, uint8_t size) const;
+    uint32_t read(const System& system, uint32_t address, uint8_t size) const;
     bool evaluate(const System& system, Achievement& achievement);
 
     AchievementBackend* backend_ = nullptr;
