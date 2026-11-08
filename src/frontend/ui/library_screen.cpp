@@ -18,6 +18,7 @@
 #include <SDL_ttf.h>
 
 #include <algorithm>
+#include <random>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -50,6 +51,7 @@ enum : WidgetId {
     kIdSearchField,
     kIdGallery,
     kIdOverlay,
+    kIdRandom,
 
     kIdChipFirst = 100,
     kIdRowFirst = 1000
@@ -158,6 +160,16 @@ void appendRightToLeft(std::vector<Button>& into, const SDL_Rect& strip,
     }
 }
 
+// A uniform pick in [0, count). The generator is seeded once per process:
+// reseeding on every press would repeat picks whenever two presses landed in
+// the same clock tick.
+std::size_t randomIndex(std::size_t count) {
+    static std::mt19937 rng{std::random_device{}()};
+    if (count <= 1) return 0;
+    std::uniform_int_distribution<std::size_t> pick(0, count - 1);
+    return pick(rng);
+}
+
 Widgets buildWidgets(const LibraryLayout& l, const Metrics& m,
                      const TextCache& text, const State& state,
                      bool have_selection) {
@@ -176,19 +188,22 @@ Widgets buildWidgets(const LibraryLayout& l, const Metrics& m,
                        {kIdPs1Bios, "PS1 BIOS"}},
                       kNoWidget);
 
-    widgets.footer.reserve(4);
+    widgets.footer.reserve(5);
     appendRightToLeft(widgets.footer, l.footer, m, text,
                       {{kIdLaunch, "Launch"},
                        {kIdOpen, "Open Game"},
+                       {kIdRandom, "Surprise Me"},
                        {kIdRescan, "Rescan"},
                        {kIdToggleView,
                         state.mode == ViewMode::List ? "Grid" : "List"}},
                       kIdLaunch);
 
-    // Launch means nothing with an empty library, and a disabled button says
-    // so more clearly than one that does nothing.
+    // Launch and the random pick both mean nothing with an empty library, and
+    // a disabled button says so more clearly than one that does nothing.
     for (Button& button : widgets.footer) {
-        if (button.id == kIdLaunch) button.enabled = have_selection;
+        if (button.id == kIdLaunch || button.id == kIdRandom) {
+            button.enabled = have_selection;
+        }
     }
 
     widgets.chips.reserve(kChipCount);
@@ -767,6 +782,15 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                 break;
             case kIdLaunch:
                 launchSelected();
+                break;
+            case kIdRandom:
+                if (!view.empty()) {
+                    // Picked from the filtered view, not the whole library,
+                    // so the search box and the chips still mean something.
+                    // The redraw below scrolls the pick into sight.
+                    state.selected = randomIndex(view.size());
+                    dirty = true;
+                }
                 break;
             case kIdOpen:
                 if (actions.browseForGame) {

@@ -139,7 +139,10 @@ add_executable(emu
     src/frontend/ui/game_overlay.cpp
     src/frontend/ui/gallery.cpp
     src/frontend/gl_overlay.cpp
-    src/frontend/hotkeys.cpp)
+    src/frontend/hotkeys.cpp
+    src/frontend/run_ahead.cpp
+    src/frontend/movie.cpp
+    src/frontend/palette_io.cpp)
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 

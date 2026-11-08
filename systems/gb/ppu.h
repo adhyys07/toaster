@@ -7,9 +7,6 @@ namespace emu::gb {
 
 class Memory;
 
-// Scanline-based DMG video. Each visible line is drawn in one go when the
-// controller enters mode 3, which is accurate for everything except effects
-// that change scroll or palette partway across a line.
 class PPU {
 public:
     explicit PPU(Memory& memory);
@@ -54,6 +51,8 @@ public:
         visit.block(line_pixels_.data(), line_pixels_.size());
     }
 
+    void setColors(const uint32_t* colors);
+
 private:
     void step();
     void setMode(uint8_t mode);
@@ -85,6 +84,10 @@ private:
     uint8_t obp1_ = 0xFF;
     uint8_t wy_ = 0;
     uint8_t wx_ = 0;
+    uint32_t colors_[4] = {
+        0xFFE0F8D0u, 0xFF88C070u, 0xFF346856u, 0xFF081820u
+    };
+
 
     uint16_t dot_ = 0;
     uint8_t mode_ = 2;

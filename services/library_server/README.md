@@ -29,8 +29,35 @@ $env:THEGAMESDB_API_KEY = "your-key"
 Catalog search is metadata-only. Toaster launches only games already present
 in the local library; this service does not download ROMs.
 
-Set `TOASTER_DATABASE` to choose a persistent database location:
+The database defaults to `toaster-library.sqlite` in this directory. Set
+`TOASTER_DATABASE` to put it somewhere persistent:
 
 ```powershell
 $env:TOASTER_DATABASE = "D:\toaster\data\library.sqlite"
+```
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness and version |
+| `POST /scan` | Scan a local games folder; also prunes rows whose file is gone |
+| `GET /games` | List locally available games; takes `limit` and `offset` |
+| `GET /games?filter=favorites` | List favorite games |
+| `GET /games?filter=recent` | List recently played games, newest first |
+| `GET /games/{id}` | One game by id |
+| `POST /games/{id}/favorite` | Change a favorite flag |
+| `POST /games/{id}/played` | Record a launch and increment the play count |
+| `PUT /games/{id}/tags` | Store user tags, normalised and deduplicated |
+| `GET /statistics` | Library totals and per-system counts |
+| `GET /catalog/search?q=...` | Search metadata without downloading games |
+
+`POST /scan` accepts `{"folder": "...", "prune_missing": false}` to keep rows
+for files that are no longer present.
+
+## Tests
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest .
 ```

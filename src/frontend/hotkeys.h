@@ -27,6 +27,8 @@ enum class HotkeyAction {
     ToggleFullscreen,
     ToggleFps,
     ToggleInputDisplay,
+    RecordMovie,
+    PlayMovie,
     Reset,
     Quit,
     Count

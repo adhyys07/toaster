@@ -112,6 +112,28 @@ public:
         bus_.setPatches(patches);
     }
 
+    bool readMemory(uint32_t address, uint8_t& value) const override {
+        if (address > 0xFFFF) return false;
+
+        value = const_cast<NesSystem*>(this)->bus_.cpuRead(
+            static_cast<uint16_t>(address), true);
+        return true;
+    }
+
+    std::vector<MemoryRegion> memoryRegions() const override {
+        return {{"RAM", 0x0000, 0x0800}, {"Save RAM", 0x6000, 0x2000}};
+    }
+
+    int paletteSize() const override { return 64; }
+
+    bool setPalette(const uint32_t* entries, int count) override {
+        // A short table would leave part of the NTSC ramp at the previous
+        // scheme, so it is refused rather than partially applied.
+        if (!entries || count < 64) return false;
+        bus_.ppu.setPalette(entries);
+        return true;
+    }
+
     bool saveState(std::vector<uint8_t>& out) const override {
         if (!cart_.loaded()) return false;
         StateWriter visit;

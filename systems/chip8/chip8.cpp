@@ -30,6 +30,16 @@ public:
 
     const char* name() const override { return "CHIP-8"; }
 
+        bool readMemory(uint32_t address, uint8_t& value) const override {
+        if (address >= 4096) return false;
+        value = vm_.peek(static_cast<uint16_t>(address));
+        return true;
+    }
+
+    std::vector<MemoryRegion> memoryRegions() const override {
+        return {{"RAM", 0x0200, 4096 - 0x0200}};
+    }
+
     bool loadRom(const std::string& path, std::string& error) override {
         return vm_.loadRom(path, error);
     }

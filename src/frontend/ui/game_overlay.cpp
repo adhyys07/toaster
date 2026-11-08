@@ -25,14 +25,18 @@ enum : int {
     kVideoFps,
     kVideoInputDisplay,
     kVideoRewind,
+    kVideoRunAhead,
+    kVideoFocusPause,
 
     kAudioMute = 300,
     kAudioVolume,
     kAudioBuffer,
+    kAudioRumble,
 
     kPadFirst = 400,
     kKeysPadFirst = 500, 
     kKeysHotkeyFirst = 600,  
+    kTurboFirst = 650,
     kCheatFirst = 700,
     kOptionFirst = 800
 };
@@ -168,6 +172,18 @@ void GameOverlay::rebuild() {
                              ? std::to_string(s->rewind_seconds) + " s"
                              : std::string("Off"),
                          kVideoRewind, false, true});
+        // Counted in frames of latency removed, which is one less than the
+        // frames simulated: a setting of 1 simulates one frame and removes
+        // none, so it reads as Off.
+        rows_.push_back({"Run-ahead",
+                         s->run_ahead_frames > 1
+                             ? std::to_string(s->run_ahead_frames - 1) +
+                                   " frames (restart)"
+                             : std::string("Off"),
+                         kVideoRunAhead, false, true});
+        rows_.push_back({"Pause when unfocused",
+                         onOff(s->pause_on_focus_loss), kVideoFocusPause,
+                         false, true});
         break;
 
     case OverlayPage::Audio:
@@ -179,6 +195,8 @@ void GameOverlay::rebuild() {
                          std::to_string(s->audio_buffer_samples) +
                              " samples (restart)",
                          kAudioBuffer, false, true});
+        rows_.push_back({"Controller rumble", onOff(s->rumble), kAudioRumble,
+                         false, true});
         break;
 
     case OverlayPage::Pad:
@@ -189,6 +207,15 @@ void GameOverlay::rebuild() {
             rows_.push_back({kPadActionNames[i],
                              padButtonLabel(s->pad_buttons[i]),
                              kPadFirst + i, false, true});
+        }
+        rows_.push_back({"Turbo", "", kRowNone, true, false});
+        // The mask is over PadAction indices rather than a core's button
+        // bits, because the bit order differs per system while this list does
+        // not.
+        for (int i = 0; i < emu::frontend::kPadActionCount; ++i) {
+            rows_.push_back({kPadActionNames[i],
+                             onOff((s->turbo_mask & (1u << i)) != 0),
+                             kTurboFirst + i, false, true});
         }
         break;
     

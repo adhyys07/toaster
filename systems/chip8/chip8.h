@@ -23,6 +23,9 @@ public:
     void clearDrawFlag() { draw_flag_ = false; }
     bool drawFlag() const { return draw_flag_; }
     bool soundActive() const { return sound_timer_ != 0; }
+    uint8_t peek(uint16_t address) const {
+        return address < memory_.size() ? memory_[address] : uint8_t{0};
+    }
 
 private:
     bool execute(uint16_t opcode);

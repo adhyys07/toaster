@@ -19,10 +19,7 @@ struct ButtonInfo {
     uint32_t    mask;         
     const char* default_key; 
 };
- 
-// A cheat, reduced to what a core needs to honour it. `compare` is only
-// consulted when has_compare is set, which is how a Game Genie code patches
-// one bank rather than whatever happens to be mapped at the address.
+
 struct MemoryPatch {
     uint16_t address = 0;
     uint8_t  value = 0;
@@ -34,13 +31,25 @@ class System {
 public:
     virtual ~System() = default;
 
-    // Cores that can intercept CPU reads override this; the rest ignore
-    // cheats rather than failing.
     virtual void setPatches(const std::vector<MemoryPatch>& patches) {
         (void)patches;
     }
     virtual bool supportsPatches() const { return false; }
- 
+    
+    virtual bool readMemory(uint32_t address, uint8_t& value) const {
+        (void)address;
+        (void)value;
+        return false;
+    }
+
+    struct MemoryRegion {
+        const char* name;
+        uint32_t start;
+        uint32_t size;
+    };
+
+    virtual std::vector<MemoryRegion> memoryRegions() const { return {}; }
+
     virtual const char* name() const = 0;
  
     virtual std::string romInfo() const { return {}; }
@@ -61,6 +70,15 @@ public:
     virtual int sampleRate() const = 0;
 
     virtual size_t readAudio(float* out, size_t frames) = 0;
+
+    virtual bool setPalette(const uint32_t* entries, int count) {
+        (void)entries;
+        (void)count;
+        return false;
+    }
+
+    virtual int paletteSize() const { return 0; }
+
 
     virtual int portCount() const { return 1; }
     virtual const std::vector<ButtonInfo>& buttons() const = 0;

@@ -31,6 +31,10 @@ public:
         const RemoteGame& game,
         bool favorite,
         std::string& error);
+    
+    bool setTags(const RemoteGame& game,
+        const std::vector<std::string>& tags,
+        std::string& error);
 
     bool markPlayed(
         const RemoteGame& game,
@@ -38,10 +42,8 @@ public:
 
     const std::vector<RemoteGame>& games() const;
 
-    // Totals for the library header. Refreshed alongside games().
     const LibraryStatistics& statistics() const;
 
-    // The cached row for a path, or nullptr when the service does not know it.
     const RemoteGame* find(const std::filesystem::path& path) const;
 
 private:

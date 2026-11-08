@@ -47,6 +47,9 @@ public:
     void    ppuWrite(uint16_t addr, uint8_t data);
 
     const uint32_t* framebuffer() const { return frame_; }
+
+    // Replaces the 64-entry NTSC colour table. Entries are 0xAARRGGBB.
+    void setPalette(const uint32_t* entries);
     uint8_t* oamBytes() { return reinterpret_cast<uint8_t*>(oam_); }
 
     bool nmi            = false;  
@@ -137,7 +140,13 @@ private:
 
     uint32_t frame_[kScreenWidth * kScreenHeight] = {};
 
-    static const uint32_t kPalette[64];
+    // The live scheme, seeded from kDefaultPalette by the constructor. It is
+    // deliberately left out of reset() and visitState(): resetting the game
+    // or loading an old save state must not drag a previous colour scheme
+    // back with it.
+    uint32_t palette_rgb_[64] = {};
+
+    static const uint32_t kDefaultPalette[64];
 };
 
 }  // namespace nes

@@ -5,7 +5,7 @@
 
 namespace nes {
 
-const uint32_t PPU::kPalette[64] = {
+const uint32_t PPU::kDefaultPalette[64] = {
     0xFF545454, 0xFF001E74, 0xFF081090, 0xFF300088, 0xFF440064, 0xFF5C0030,
     0xFF540400, 0xFF3C1800, 0xFF202A00, 0xFF083A00, 0xFF004000, 0xFF003C00,
     0xFF00323C, 0xFF000000, 0xFF000000, 0xFF000000,
@@ -42,7 +42,15 @@ uint8_t reverseBits(uint8_t b) {
 
 }  // namespace
 
-PPU::PPU() { reset(); }
+PPU::PPU() {
+    std::memcpy(palette_rgb_, kDefaultPalette, sizeof(palette_rgb_));
+    reset();
+}
+
+void PPU::setPalette(const uint32_t* entries) {
+    if (!entries) return;
+    std::memcpy(palette_rgb_, entries, sizeof(palette_rgb_));
+}
 
 void PPU::reset() {
     ctrl_ = mask_ = status_ = 0;
@@ -462,7 +470,7 @@ void PPU::clock() {
     if (scanline_ >= 0 && scanline_ < kScreenHeight &&
         cycle_ >= 1 && cycle_ <= kScreenWidth) {
         const uint8_t index = ppuRead(static_cast<uint16_t>(0x3F00 + (palette << 2) + pixel));
-        frame_[scanline_ * kScreenWidth + (cycle_ - 1)] = kPalette[index & 0x3F];
+        frame_[scanline_ * kScreenWidth + (cycle_ - 1)] = palette_rgb_[index & 0x3F];
     }
 
     // ------------------------------------------------------------ advance

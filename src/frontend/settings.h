@@ -45,6 +45,20 @@ struct Settings {
     int rewind_seconds = 10;
     int volume = 100;
     int audio_buffer_samples = 1024;
+    int run_ahead_frames = 1;
+    uint32_t turbo_mask = 0;
+    int turbo_period = 4;
+    bool rumble = true;
+
+    // Pauses the game when the window loses focus. Tracked separately from
+    // the manual pause so regaining focus cannot resume a game the player
+    // paused on purpose.
+    bool pause_on_focus_loss = true;
+
+    // Name of the colour scheme to hand the core, empty for the core's own.
+    // Only cores that report a paletteSize() use it.
+    std::string palette;
+
     std::string theme = "midnight";
 
     // Draws a live controller read-out over the game. Only the SDL renderer

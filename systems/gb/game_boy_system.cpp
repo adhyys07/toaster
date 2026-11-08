@@ -130,6 +130,30 @@ public:
         memory_.setPatches(patches);
     }
 
+    bool readMemory(uint32_t address, uint8_t& value) const override {
+        if (address > 0xFFFF) return false;
+        value = const_cast<GameBoySystem*>(this)->memory_.readRaw(
+            static_cast<uint16_t>(address));
+        return true;
+    }
+
+    std::vector<MemoryRegion> memoryRegions() const override {
+        return {{"WRAM", 0xC000, 0x2000},
+                {"Cart RAM", 0xA000, 0x2000},
+                {"HRAM", 0xFF80, 0x007F}};
+    }
+
+    int paletteSize() const override { return 4; }
+
+    bool setPalette(const uint32_t* entries, int count) override {
+        // Index 0 is the lightest shade. Fewer than four entries would leave
+        // the rest of the ramp at the previous scheme, which reads as a
+        // rendering bug rather than a bad palette, so it is refused.
+        if (!entries || count < 4) return false;
+        ppu_.setColors(entries);
+        return true;
+    }
+
     bool saveState(std::vector<uint8_t>& out) const override {
         if (!cartridge_.loaded()) return false;
 

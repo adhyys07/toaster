@@ -454,6 +454,36 @@ Settings loadSettings() {
                     settings.pad_buttons[index] = button;
                 }
             } catch (...) {}
+        }         else if (key == "run_ahead_frames") {
+            try {
+                settings.run_ahead_frames =
+                    std::clamp(std::stoi(value), 1, 8);
+            } catch (...) {
+                settings.run_ahead_frames = 1;
+            }
+        } else if (key == "turbo_mask") {
+            try {
+                // A decimal bitmask over PadAction indices. Appending a new
+                // pad action to the enum therefore cannot change the
+                // meaning of bits already written to settings.ini.
+                settings.turbo_mask =
+                    static_cast<uint32_t>(std::stoul(value));
+            } catch (...) {
+                settings.turbo_mask = 0;
+            }
+        } else if (key == "turbo_period") {
+            try {
+                settings.turbo_period = std::clamp(std::stoi(value), 2, 30);
+            } catch (...) {
+                settings.turbo_period = 4;
+            }
+        } else if (key == "rumble") {
+            settings.rumble = value == "true" || value == "1";
+        } else if (key == "pause_on_focus_loss") {
+            settings.pause_on_focus_loss =
+                value == "true" || value == "1";
+        } else if (key == "palette") {
+            settings.palette = value;
         }
     }
 
@@ -477,6 +507,16 @@ bool saveSettings(const Settings& settings) {
         << std::clamp(settings.audio_buffer_samples, 256, 4096) << '\n'
         << "audio_device=" << settings.audio_device << '\n';
     
+    file << "run_ahead_frames=" << std::clamp(settings.run_ahead_frames, 1, 8)
+         << '\n';
+    file << "turbo_mask=" << settings.turbo_mask << '\n';
+    file << "turbo_period=" << std::clamp(settings.turbo_period, 2, 30)
+         << '\n';
+    file << "rumble=" << (settings.rumble ? "true" : "false") << '\n';
+    file << "pause_on_focus_loss="
+         << (settings.pause_on_focus_loss ? "true" : "false") << '\n';
+    file << "palette=" << settings.palette << '\n';
+
     file << "input_display="
          << (settings.input_display ? "true" : "false") << '\n';
     file << "theme=" << (settings.theme.empty() ? "midnight" : settings.theme)

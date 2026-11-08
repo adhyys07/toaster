@@ -41,10 +41,37 @@ void ArtworkCache::clear(){
     textures_.clear();
 }
 
+bool setCoverArt(const std::string& rom_path, const std::string& image_path,
+                 std::string& error) {
+    std::error_code ec;
+    std::filesystem::path target(rom_path);
+    target.replace_extension(".cover.png");
+
+    std::filesystem::copy_file(
+        image_path, target,
+        std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        error = "Could not write the cover: " + ec.message();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+
 std::string findArtwork(const std::string& rom_path) {
     std::error_code ignored;
     const fs::path rom(rom_path);
     static const char* extensions[] = {".png",".jpg",".jpeg",".bmp"};
+
+    // A cover the player picked from a screenshot wins over anything named
+    // after the ROM or scraped into artwork/, which is the point of picking
+    // one. setCoverArt writes exactly this path.
+    {
+        fs::path chosen = rom;
+        chosen.replace_extension(".cover.png");
+        if (fs::is_regular_file(chosen, ignored)) return chosen.string();
+    }
 
     for (const char* extension : extensions) {
         fs::path candidate = rom;

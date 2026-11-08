@@ -8,9 +8,9 @@ namespace emu::gb {
 namespace {
 
 // DMG panel colours, index 0 lightest.
-constexpr uint32_t kColors[4] = {
-    0xFFE0F8D0u, 0xFF88C070u, 0xFF346856u, 0xFF081820u
-};
+void PPU::setColors(const uint32_t* colors) {
+    for (int i = 0; i < 4; ++i) colors_[i] = colors[i];
+}
 
 // A palette register packs four 2-bit shades, low bits first.
 inline uint8_t shadeOf(uint8_t palette, uint8_t pixel) {
@@ -31,7 +31,7 @@ PPU::PPU(Memory& memory)
 }
 
 void PPU::reset() {
-    framebuffer_.fill(kColors[0]);
+    framebuffer_.fill(colors_[0]);
     line_pixels_.fill(0);
 
     lcdc_ = 0x91;
@@ -77,7 +77,7 @@ void PPU::renderBackground() {
         // means it never blocks a sprite.
         for (int x = 0; x < 160; ++x) {
             line_pixels_[x] = 0;
-            framebuffer_[ly_ * 160 + x] = kColors[0];
+            framebuffer_[ly_ * 160 + x] = colors_[0];
         }
         return;
     }
@@ -99,7 +99,7 @@ void PPU::renderBackground() {
             tilePixel(data_base, tile, world_x & 7, pixel_y, signed_index);
 
         line_pixels_[x] = pixel;
-        framebuffer_[ly_ * 160 + x] = kColors[shadeOf(bgp_, pixel)];
+        framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
     }
 }
 
@@ -126,7 +126,7 @@ void PPU::renderWindow() {
                                         pixel_y, signed_index);
 
         line_pixels_[x] = pixel;
-        framebuffer_[ly_ * 160 + x] = kColors[shadeOf(bgp_, pixel)];
+        framebuffer_[ly_ * 160 + x] = colors_[shadeOf(bgp_, pixel)];
     }
 
     ++window_line_;
@@ -192,7 +192,7 @@ void PPU::renderSprites() {
             if (pixel == 0) continue;                  // colour 0 is clear
             if (behind_background && line_pixels_[x] != 0) continue;
 
-            framebuffer_[ly_ * 160 + x] = kColors[shadeOf(palette, pixel)];
+            framebuffer_[ly_ * 160 + x] = colors_[shadeOf(palette, pixel)];
         }
     }
 }
@@ -268,7 +268,7 @@ void PPU::tick(unsigned cycles) {
             ly_ = 0;
             dot_ = 0;
             window_line_ = 0;
-            framebuffer_.fill(kColors[0]);
+            framebuffer_.fill(colors_[0]);
             setMode(0);
         }
         return;
