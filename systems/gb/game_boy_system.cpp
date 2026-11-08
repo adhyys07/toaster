@@ -1,6 +1,7 @@
 #include "game_boy_system.h"
 
 #include "../../src/core/serializer.h"
+#include "../../src/frontend/save_backup.h"
 #include "apu.h"
 #include "cartridge.h"
 #include "cpu.h"
@@ -9,6 +10,7 @@
 #include "timer.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <iomanip>
 #include <sstream>
 
@@ -30,8 +32,22 @@ public:
         memory_.connect(&ppu_, &apu_, &timer_);
     }
 
+    void setSaveBackupCount(int keep) override { save_backup_count_ = keep; }
+
     ~GameBoySystem() override {
-        if (!rom_path_.empty() && !cartridge_.saveBattery(rom_path_)) {
+        if (rom_path_.empty()) return;
+        // Rotated before the overwrite, while the old contents are still
+        // on disk: rotating after would copy the state that just replaced
+        // it, which backs up nothing.
+        const std::filesystem::path save_path =
+            std::filesystem::path(rom_path_).replace_extension(".srm");
+        std::string backup_error;
+        if (!emu::frontend::rotateBackups(save_path, save_backup_count_,
+                                          backup_error)) {
+            std::fprintf(stderr, "Save backup: %s\n",
+                         backup_error.c_str());
+        }
+        if (!cartridge_.saveBattery(rom_path_)) {
             std::fprintf(stderr, "Could not save Game Boy cartridge RAM\n");
         }
     }
@@ -287,6 +303,9 @@ private:
     // From the cartridge header. Not part of the save state: a state that
     // forced this would let a DMG ROM load into a CGB-configured core.
     bool color_ = false;
+    // Matches Settings::save_backups' default so a frontend that never
+    // calls setSaveBackupCount still gets some protection.
+    int save_backup_count_ = 3;
 
     std::vector<ButtonInfo> buttons_{
         {"A", 1u << 0, "Z"},

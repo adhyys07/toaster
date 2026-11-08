@@ -1,5 +1,8 @@
 #pragma once
 
+// For Compat, which RemoteGame and GameEntry both carry.
+#include "game_entry.h"
+
 #include <string>
 #include <vector>
 
@@ -16,6 +19,8 @@ struct RemoteGame {
     long long last_played = 0;
     int play_count = 0;
     std::string tags;
+    Compat compat = Compat::Unknown;
+    long long seconds_played = 0;
 };
 
 struct LibraryStatistics {
@@ -64,6 +69,11 @@ public:
     bool setTags(
         int game_id,
         const std::vector<std::string>& tags,
+        std::string& error);
+
+    bool addPlayTime(
+        int game_id,
+        long long seconds,
         std::string& error);
 
     bool getStatistics(

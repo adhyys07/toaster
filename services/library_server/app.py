@@ -27,8 +27,17 @@ class FavoriteRequest(BaseModel):
     favorite: bool
 
 
+class PlayTimeRequest(BaseModel):
+    # A session longer than a day means a timer that never stopped, not a
+    # marathon, and recording those makes the totals worthless.
+    seconds: int = Field(ge=0, le=24 * 60 * 60)
+
+
 class TagsRequest(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=64)
+
+class CompatRequest(BaseModel):
+    compat: int = Field(ge=0, le=5)
 
 
 # Battery saves and the ten state slots, and nothing else. `kind` lands in
@@ -133,6 +142,13 @@ def played(game_id: int):
     return {"success": True}
 
 
+@app.post("/games/{game_id}/playtime")
+def playtime(game_id: int, request: PlayTimeRequest):
+    if not database.add_play_time(game_id, request.seconds):
+        raise HTTPException(status_code=404, detail="Game not found")
+    return {"success": True}
+
+
 @app.put("/games/{game_id}/tags")
 def tags(game_id: int, request: TagsRequest):
     if not database.set_tags(game_id, request.tags):
@@ -195,3 +211,9 @@ def get_save(game_id: int, kind: str):
         media_type="application/octet-stream",
         headers={"X-Save-Digest": record["digest"]},
     )
+
+@app.put("/games/{game_id}/compat")
+def compat(game_id: int, request: CompatRequest):
+    if not database.set_compat(game_id, request.compat):
+        raise HTTPException(status_code=404, detail="Game not found")
+    return {"success": True, "compat": request.compat}

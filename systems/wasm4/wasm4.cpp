@@ -166,7 +166,7 @@ void Console::setGamepad(int player, uint8_t state) {
 }
 
 void Console::vline(int32_t x, int32_t y, uint32_t length) {
-    const uint8_t colout = drawColor(0);
+    const uint8_t colour = drawColor(0);
     if (colour == 0) return;
     for (uint32_t i = 0; i < length; ++i) {
         setPixel(x, y + static_cast<int32_t>(i),

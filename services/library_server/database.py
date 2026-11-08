@@ -7,7 +7,7 @@ class GameDatabase:
     # Every query returns the same column set, so the frontend can rely on it.
     _COLUMNS = """
         id, path, title, system, extension, artwork,
-        favorite, last_played, play_count, tags
+        favorite, last_played, play_count, tags, seconds_played, compat
     """
 
     def __init__(self, database_path: str):
@@ -57,6 +57,15 @@ class GameDatabase:
             self.connection.execute(
                 "ALTER TABLE games ADD COLUMN tags TEXT NOT NULL DEFAULT ''"
             )
+        if "seconds_played" not in columns:
+            self.connection.execute(
+                "ALTER TABLE games ADD COLUMN "
+                "seconds_played INTEGER NOT NULL DEFAULT 0"
+            )
+        if "compat" not in columns:
+            self.connection.execute(
+                "ALTER TABLE games ADD COLUMN compat INTEGER NOT NULL DEFAULT 0"
+            )
 
         # The library window re-queries on every keystroke. Filtering in
         # Python meant reading the whole table each time; these let SQLite do
@@ -96,11 +105,6 @@ class GameDatabase:
         self.upsert_games([game])
 
     def upsert_games(self, games) -> int:
-        """Inserts a whole scan in one transaction.
-
-        The previous version committed once per row, which made scanning a
-        large folder far slower than it needed to be.
-        """
         rows = [
             (
                 game["path"], game["title"], game["system"],
@@ -197,8 +201,18 @@ class GameDatabase:
             )
         return cursor.rowcount == 1
 
+    def set_compat(self, game_id: int, compat: int) -> bool:
+        if compat < 0 or compat > 5:
+            return False
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                "UPDATE games SET compat = ? WHERE id = ?",
+                (compat, game_id),
+            )
+        return cursor.rowcount == 1
+
+
     def saves_directory(self) -> Path:
-        """Where save blobs are kept, beside the database file."""
         folder = self.database_path.parent / "saves"
         folder.mkdir(parents=True, exist_ok=True)
         return folder
@@ -238,6 +252,23 @@ class GameDatabase:
             (game_id, kind),
         ).fetchone()
         return dict(row) if row else None
+
+    def add_play_time(self, game_id: int, seconds: int) -> bool:
+        """Accumulates wall seconds against a game.
+
+        Added server-side rather than written as a total, so two machines
+        playing the same game both contribute instead of the last writer
+        winning.
+        """
+        if seconds <= 0:
+            return True
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                "UPDATE games SET seconds_played = seconds_played + ? "
+                "WHERE id = ?",
+                (seconds, game_id),
+            )
+        return cursor.rowcount == 1
 
     def statistics(self):
         systems = self.connection.execute("""

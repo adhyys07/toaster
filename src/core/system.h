@@ -99,6 +99,11 @@ public:
 
     virtual int paletteSize() const { return 0; }
 
+    // How many rotated copies of a battery save to keep. A no-op for a
+    // core with no battery saves. Set once by the frontend right after
+    // construction, so the core never needs to know about Settings.
+    virtual void setSaveBackupCount(int keep) { (void)keep; }
+
 
     virtual int portCount() const { return 1; }
     virtual const std::vector<ButtonInfo>& buttons() const = 0;

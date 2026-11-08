@@ -31,6 +31,7 @@ enum class HotkeyAction {
     PlayMovie,
     SlowMotion,
     UndoLoad,
+    PerfOverlay,
     Reset,
     Quit,
     Count

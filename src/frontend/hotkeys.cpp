@@ -46,6 +46,8 @@ const HotkeySpec kHotkeys[] = {
      SDL_SCANCODE_F11, kModCtrl},
     {"play_movie", HotkeyAction::PlayMovie, "Play input replay",
      SDL_SCANCODE_F12, kModCtrl},
+    {"perf_overlay", HotkeyAction::PerfOverlay, "Performance graph",
+     SDL_SCANCODE_F4, kModNone},
     {"slow_motion", HotkeyAction::SlowMotion, "Slow motion",
      SDL_SCANCODE_GRAVE, kModNone},
     {"undo_load", HotkeyAction::UndoLoad, "Undo the last state load",

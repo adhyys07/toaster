@@ -40,6 +40,11 @@ public:
         const RemoteGame& game,
         std::string& error);
 
+    bool addPlayTime(
+        const RemoteGame& game,
+        long long seconds,
+        std::string& error);
+
     const std::vector<RemoteGame>& games() const;
 
     const LibraryStatistics& statistics() const;

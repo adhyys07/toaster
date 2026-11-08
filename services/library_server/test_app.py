@@ -357,3 +357,37 @@ def test_a_missing_save_is_404(client, games_folder):
     game_id = client.get("/games").json()[0]["id"]
 
     assert client.get(f"/saves/{game_id}/state9").status_code == 404
+
+
+def test_play_time_starts_at_zero(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game = client.get("/games").json()[0]
+    assert game["seconds_played"] == 0
+
+
+def test_play_time_accumulates(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    client.post(f"/games/{game_id}/playtime", json={"seconds": 90})
+    client.post(f"/games/{game_id}/playtime", json={"seconds": 30})
+
+    # Added rather than overwritten, so two machines both contribute.
+    game = client.get(f"/games/{game_id}").json()
+    assert game["seconds_played"] == 120
+
+
+def test_play_time_rejects_an_impossible_session(client, games_folder):
+    client.post("/scan", json={"folder": games_folder})
+    game_id = client.get("/games").json()[0]["id"]
+
+    over_a_day = 24 * 60 * 60 + 1
+    response = client.post(
+        f"/games/{game_id}/playtime", json={"seconds": over_a_day}
+    )
+    assert response.status_code == 422
+
+
+def test_play_time_for_an_unknown_game_is_404(client):
+    assert client.post("/games/999/playtime",
+                       json={"seconds": 60}).status_code == 404

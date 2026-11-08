@@ -1,5 +1,7 @@
 #include "game_overlay.h"
 
+#include "version.h"
+
 // toRenderCoords: mouse coordinates arrive in window units and the panel is
 // laid out in render units, which differ on a HiDPI display.
 #include "layout.h"
@@ -37,6 +39,7 @@ enum : int {
     kAudioBuffer,
     kAudioRumble,
 
+    kPadDeadzone = 390,
     kPadFirst = 400,
     kKeysPadFirst = 500, 
     kKeysHotkeyFirst = 600,  
@@ -52,7 +55,22 @@ enum : int {
     kOptionVsync,
     kOptionFps,
     kOptionMute,
-    kOptionFastForward
+    kOptionFastForward,
+
+    kPauseSaves = 850,
+    kPauseLog,
+    kPauseAbout,
+
+    // Up to kCapacity (512) log lines could exist, but a page that long is
+    // unusable anyway; the ten most recent at the current filter level are
+    // what is shown, so this only needs headroom for the filter row.
+    kLogLevelFilter = 900,
+    kLogClear,
+
+    // Twice the width of rotateBackups' largest keep count (9 backups + 1
+    // live = 10), so Restore and Delete ids for the same file never touch.
+    kSaveRestoreFirst = 1000,
+    kSaveDeleteFirst = 1100
 };
 
 const char* kPadActionNames[emu::frontend::kPadActionCount] = {
@@ -93,6 +111,16 @@ std::string padButtonLabel(int button) {
 
 std::string onOff(bool value) { return value ? "On" : "Off"; }
 
+const char* logLevelName(emu::frontend::LogLevel level) {
+    switch (level) {
+    case emu::frontend::LogLevel::Debug:   return "Debug";
+    case emu::frontend::LogLevel::Info:    return "Info";
+    case emu::frontend::LogLevel::Warning: return "Warning";
+    case emu::frontend::LogLevel::Error:   return "Error";
+    default:                               return "";
+    }
+}
+
 std::string percent(int value) { return std::to_string(value) + "%"; }
 
 }
@@ -107,6 +135,9 @@ const char* overlayPageName(OverlayPage page) {
     case OverlayPage::Keys:        return "Keyboard";
     case OverlayPage::Cheats:      return "Cheats";
     case OverlayPage::GameOptions: return "This game";
+    case OverlayPage::Saves:       return "Save manager";
+    case OverlayPage::Log:         return "Log";
+    case OverlayPage::About:       return "About";
     default:                       return "";
     }
 }
@@ -158,6 +189,10 @@ void GameOverlay::rebuild() {
                          static_cast<bool>(hooks_.openGallery)});
         rows_.push_back({"Fullscreen", "", kPauseFullscreen, false,
                          static_cast<bool>(hooks_.toggleFullscreen)});
+        rows_.push_back({"Save manager", "", kPauseSaves, false,
+                         static_cast<bool>(hooks_.saveFiles)});
+        rows_.push_back({"Log", "", kPauseLog, false, true});
+        rows_.push_back({"About", "", kPauseAbout, false, true});
         rows_.push_back({"Quit to library", "", kPauseQuit, false, true});
         break;
     
@@ -215,6 +250,9 @@ void GameOverlay::rebuild() {
 
     case OverlayPage::Pad:
         if (!s) break;
+        rows_.push_back({"Stick deadzone",
+                         std::to_string(s->stick_deadzone) + "%",
+                         kPadDeadzone, false, true});
         rows_.push_back({"Press Enter on a row, then a pad button", "",
                          kRowNone, true, false});
         for (int i = 0; i < emu::frontend::kPadActionCount; ++i) {
@@ -318,6 +356,79 @@ void GameOverlay::rebuild() {
                          kOptionFastForward, false, true});
         break;
     }
+
+    case OverlayPage::Saves: {
+        save_files_ = hooks_.saveFiles ? hooks_.saveFiles()
+                                       : std::vector<emu::frontend::SaveFile>{};
+        if (save_files_.empty()) {
+            rows_.push_back({"No save files for this game", "", kRowNone,
+                             true, false});
+            break;
+        }
+        for (std::size_t i = 0; i < save_files_.size(); ++i) {
+            const emu::frontend::SaveFile& file = save_files_[i];
+            const std::string size = emu::frontend::formatBytes(file.bytes);
+
+            // Restore is disabled on the live save itself: restoring it
+            // onto itself is meaningless and the id range is shared with
+            // the backups, so this keeps activate() from acting on it.
+            rows_.push_back(
+                {file.label + (file.is_backup ? "" : " (live)"), size,
+                 kSaveRestoreFirst + static_cast<int>(i), false,
+                 file.is_backup && static_cast<bool>(hooks_.restoreSaveBackup)});
+            rows_.push_back(
+                {std::string("  Delete") + (file.is_backup ? "" : " (careful: live save)"),
+                 "", kSaveDeleteFirst + static_cast<int>(i), false,
+                 static_cast<bool>(hooks_.deleteSaveFileHook)});
+        }
+        break;
+    }
+
+    case OverlayPage::Log: {
+        rows_.push_back({"Minimum level",
+                         logLevelName(static_cast<emu::frontend::LogLevel>(
+                             log_level_)),
+                         kLogLevelFilter, false, true});
+        rows_.push_back({"Clear", "", kLogClear, false, true});
+        rows_.push_back({"", "", kRowNone, true, false});
+
+        const std::vector<emu::frontend::LogBuffer::Line> lines =
+            emu::frontend::LogBuffer::instance().snapshot(
+                static_cast<emu::frontend::LogLevel>(log_level_));
+        if (lines.empty()) {
+            rows_.push_back({"Nothing logged yet", "", kRowNone, true,
+                             false});
+        } else {
+            // Most recent first: a line someone opened this page to find
+            // is almost always the one that just happened.
+            for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+                rows_.push_back({it->text, "", kRowNone, true, false});
+            }
+        }
+        break;
+    }
+
+    case OverlayPage::About:
+        rows_.push_back({"Toaster", TOASTER_VERSION, kRowNone, true, false});
+        rows_.push_back({"Commit", TOASTER_COMMIT, kRowNone, false, false});
+        rows_.push_back({"Built", TOASTER_BUILD_DATE, kRowNone, false, false});
+        rows_.push_back({"Compiler", TOASTER_COMPILER, kRowNone, false,
+                         false});
+        {
+            SDL_version linked;
+            SDL_GetVersion(&linked);
+            char sdl[32] = {};
+            std::snprintf(sdl, sizeof(sdl), "%u.%u.%u", linked.major,
+                          linked.minor, linked.patch);
+            // The linked version, not the one compiled against: a
+            // mismatched DLL beside the exe is a real failure mode and
+            // this is what would expose it.
+            rows_.push_back({"SDL", sdl, kRowNone, false, false});
+        }
+        if (hooks_.buildInfo) {
+            rows_.push_back({hooks_.buildInfo(), "", kRowNone, true, false});
+        }
+        break;
 
     default:
         break;
@@ -547,6 +658,16 @@ void GameOverlay::adjust(int delta) {
         s->audio_buffer_samples = std::clamp(samples, 256, 4096);
     } else if (s && id == kAudioRumble) {
         s->rumble = !s->rumble;
+    } else if (s && id == kPadDeadzone) {
+        s->stick_deadzone = std::clamp(s->stick_deadzone + delta * 5, 5, 95);
+    } else if (id == kLogLevelFilter) {
+        // s is unused here, so this does not gate on it like the Settings
+        // rows above: the log filter is Overlay-local state, not Settings.
+        constexpr int kLevelCount = 4;
+        log_level_ = ((log_level_ + delta) % kLevelCount + kLevelCount) %
+                     kLevelCount;
+        dirty_ = true;
+        return;
     } else if (s && id >= kTurboFirst &&
                id < kTurboFirst + emu::frontend::kPadActionCount) {
         s->turbo_mask ^= 1u << (id - kTurboFirst);
@@ -614,6 +735,24 @@ void GameOverlay::activate() {
         scroll_ = 0;
         dirty_ = true;
         return;
+    case kPauseSaves:
+        page_ = OverlayPage::Saves;
+        selected_ = 0;
+        scroll_ = 0;
+        dirty_ = true;
+        return;
+    case kPauseLog:
+        page_ = OverlayPage::Log;
+        selected_ = 0;
+        scroll_ = 0;
+        dirty_ = true;
+        return;
+    case kPauseAbout:
+        page_ = OverlayPage::About;
+        selected_ = 0;
+        scroll_ = 0;
+        dirty_ = true;
+        return;
     case kPauseReset:
         if (hooks_.reset) hooks_.reset();
         close();
@@ -630,8 +769,44 @@ void GameOverlay::activate() {
     case kPauseQuit:
         if (hooks_.quit) hooks_.quit();
         return;
+    case kLogClear:
+        emu::frontend::LogBuffer::instance().clear();
+        dirty_ = true;
+        return;
     default:
         break;
+    }
+
+    // Restore and Delete are one-shot actions on the Saves page, not
+    // toggled values, so they act here rather than falling through to the
+    // generic adjust(1) every other row uses.
+    if (id >= kSaveRestoreFirst && id < kSaveRestoreFirst + 100) {
+        const std::size_t index =
+            static_cast<std::size_t>(id - kSaveRestoreFirst);
+        if (index < save_files_.size() && hooks_.restoreSaveBackup) {
+            const bool ok = hooks_.restoreSaveBackup(save_files_[index]);
+            if (hooks_.notify) {
+                hooks_.notify(
+                    ok ? "Save restored" : "Could not restore the save",
+                    ok ? Toast::Kind::Info : Toast::Kind::Error);
+            }
+            dirty_ = true;
+        }
+        return;
+    }
+    if (id >= kSaveDeleteFirst && id < kSaveDeleteFirst + 100) {
+        const std::size_t index =
+            static_cast<std::size_t>(id - kSaveDeleteFirst);
+        if (index < save_files_.size() && hooks_.deleteSaveFileHook) {
+            const bool ok = hooks_.deleteSaveFileHook(save_files_[index]);
+            if (hooks_.notify) {
+                hooks_.notify(ok ? "Save file deleted"
+                                 : "Could not delete the save file",
+                              ok ? Toast::Kind::Info : Toast::Kind::Error);
+            }
+            dirty_ = true;
+        }
+        return;
     }
 
     // A binding row arms itself and waits for the next key or pad button.

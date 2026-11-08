@@ -20,7 +20,10 @@ const char* systemShortName(SystemId system);
 template <typename Entry>
 class GameViewT {
 public:
-    enum class Filter { All, Favorites, Recent, System };
+    // Playable is int-compared against Entry::compat rather than
+    // naming the Compat enum here, so this generic view stays free of
+    // a dependency on one entry type's header.
+    enum class Filter { All, Favorites, Recent, System, Playable };
     enum class Sort { Title, Year, System, LastPlayed };
 
     void setSource(const std::vector<Entry>* games) {
@@ -141,6 +144,11 @@ bool GameViewT<Entry>::refresh() {
         if (filter_ == Filter::Recent && game.last_played == 0) continue;
         if (filter_ == Filter::System &&
             systemFromPath(game.path.string()) != system_) {
+            continue;
+        }
+        // 5 is Compat::Playable; compared as an int so this header does
+        // not need to include GameEntry's.
+        if (filter_ == Filter::Playable && static_cast<int>(game.compat) < 5) {
             continue;
         }
 

@@ -46,7 +46,11 @@
 #include "ui/game_overlay.h"
 #include "ui/layout.h"
 #include "ui/library_screen.h"
+#include "ui/perf_overlay.h"
 #include "ui/theme_io.h"
+#include "audio_sync.h"
+#include "log_buffer.h"
+#include "save_file.h"
 #include "run_ahead.h"
 #include "turbo.h"
 
@@ -94,6 +98,19 @@ namespace fs = std::filesystem;
 
 using GameEntry = emu::frontend::GameEntry;
 
+// True when an .ini beside the ROM overrides any global setting.
+// Resolved once per list build rather than per row per frame: the row
+// renderer runs at 60Hz and reading a file from it would be absurd.
+bool hasCustomConfig(const fs::path& path) {
+    const emu::frontend::GameSettings game =
+        emu::frontend::loadGameSettings(path.string());
+    const auto& present = game.present;
+    return present.scale || present.integer_scale ||
+           present.bilinear_filter || present.vsync ||
+           present.show_fps || present.mute_audio ||
+           present.fast_forward_speed;
+}
+
 std::string gamePathKey(const fs::path& path) {
     // Same normalization the library service matching uses, so favorites.txt
     // keys and remote lookups can never disagree about what a path means.
@@ -110,6 +127,13 @@ fs::path hotkeyFile() {
 struct PlayRecord {
     long long last_played = 0;
     int play_count = 0;
+    // Total wall seconds across all sessions.
+    long long seconds_played = 0;
+    // Seconds not yet reported to the library service. Tracked apart
+    // from the total so a session played offline is pushed once, when
+    // the service is next reachable, rather than being lost or
+    // double-counted.
+    long long pending_seconds = 0;
 };
 
 fs::path playHistoryFile() {
@@ -127,23 +151,33 @@ std::map<std::string, PlayRecord> loadPlayHistory() {
     std::string line;
     while (std::getline(input, line)) {
         if (line.empty() || line[0] == '#') continue;
-        // Split from the right: a Windows path contains colons, spaces and
-        // backslashes, but the two trailing fields are always the numbers
-        // after the last two bars.
-        const auto last = line.rfind('|');
-        if (last == std::string::npos || last == 0) continue;
-        const auto first = line.rfind('|', last - 1);
-        if (first == std::string::npos) continue;
+        // A plain left-to-right split, because "|" is not a legal
+        // character in a Windows path and nothing else here uses it.
+        // Files written before play time existed carry three fields
+        // instead of five and still load, with the new values at zero.
+        std::vector<std::string> parts;
+        std::size_t start = 0;
+        while (true) {
+            const auto bar = line.find('|', start);
+            if (bar == std::string::npos) {
+                parts.push_back(line.substr(start));
+                break;
+            }
+            parts.push_back(line.substr(start, bar - start));
+            start = bar + 1;
+        }
+        if (parts.size() < 3 || parts[0].empty()) continue;
 
         PlayRecord record;
         try {
-            record.play_count = std::stoi(line.substr(last + 1));
-            record.last_played =
-                std::stoll(line.substr(first + 1, last - first - 1));
+            record.last_played = std::stoll(parts[1]);
+            record.play_count = std::stoi(parts[2]);
+            if (parts.size() > 3) record.seconds_played = std::stoll(parts[3]);
+            if (parts.size() > 4) record.pending_seconds = std::stoll(parts[4]);
         } catch (const std::exception&) {
             continue;
         }
-        out[line.substr(0, first)] = record;
+        out[parts[0]] = record;
     }
     return out;
 }
@@ -153,9 +187,27 @@ bool savePlayHistory(const std::map<std::string, PlayRecord>& history) {
     if (!output) return false;
     for (const auto& entry : history) {
         output << entry.first << '|' << entry.second.last_played << '|'
-               << entry.second.play_count << '\n';
+               << entry.second.play_count << '|'
+               << entry.second.seconds_played << '|'
+               << entry.second.pending_seconds << '\n';
     }
     return output.good();
+}
+
+// Adds a finished session to recent.ini. Called from the game loop on
+// the way out, where the library service is not available, so the
+// seconds are banked locally and pushed on the next trip through the
+// menu.
+void appendPlayTime(const fs::path& game_path, long long seconds) {
+    if (seconds <= 0) return;
+
+    std::map<std::string, PlayRecord> history = loadPlayHistory();
+    PlayRecord& record = history[emu::frontend::libraryPathKey(game_path)];
+    record.seconds_played += seconds;
+    record.pending_seconds += seconds;
+    if (!savePlayHistory(history)) {
+        std::fprintf(stderr, "Could not record play time\n");
+    }
 }
 
 std::set<std::string> loadFavorites() {
@@ -246,6 +298,7 @@ std::vector<GameEntry> scanGames(const fs::path& folder) {
                 game.artwork =
                     emu::frontend::findArtwork(item.path().string());
             }
+            game.custom_config = hasCustomConfig(game.path);
             games.push_back(std::move(game));
         }
     }
@@ -302,6 +355,7 @@ std::string showGameMenu(const fs::path& folder,
             if (found == history.end()) continue;
             game.last_played = found->second.last_played;
             game.play_count = found->second.play_count;
+            game.seconds_played = found->second.seconds_played;
         }
     };
     applyHistory();
@@ -309,6 +363,39 @@ std::string showGameMenu(const fs::path& folder,
     // Copies the service's cached rows into the list the menu draws. Every
     // refresh goes through here so artwork and tags cannot end up populated
     // on one code path and missing on another.
+    // Sessions played while the service was unreachable are banked in
+    // recent.ini and pushed here, once. Cleared only on a successful
+    // push, so a failure retries next time rather than losing the time.
+    const auto flushPendingPlayTime = [&] {
+        // No `scanning` check: the only caller runs straight after a
+        // synchronous scanFolder, so no background scan can own the
+        // library here.
+        if (!library) return;
+
+        std::map<std::string, PlayRecord> pending = loadPlayHistory();
+        bool flushed = false;
+        for (auto& entry : pending) {
+            if (entry.second.pending_seconds <= 0) continue;
+            const emu::frontend::RemoteGame* remote =
+                library->find(entry.first);
+            if (!remote) continue;
+
+            std::string flush_error;
+            if (library->addPlayTime(*remote,
+                                     entry.second.pending_seconds,
+                                     flush_error)) {
+                entry.second.pending_seconds = 0;
+                flushed = true;
+            } else {
+                std::fprintf(stderr, "Could not report play time: %s\n",
+                             flush_error.c_str());
+            }
+        }
+        if (flushed && !savePlayHistory(pending)) {
+            std::fprintf(stderr, "Could not clear reported play time\n");
+        }
+    };
+
     const auto adoptLibraryGames = [&] {
         if (!library) return;
         games.clear();
@@ -323,6 +410,11 @@ std::string showGameMenu(const fs::path& folder,
             // nothing read them, which is why there was no Recent chip.
             game.last_played = remote.last_played;
             game.play_count = remote.play_count;
+            game.compat = remote.compat;
+            game.seconds_played = remote.seconds_played;
+            // Read from disk, not the service: per-game overrides are
+            // local files and deliberately never synced.
+            game.custom_config = hasCustomConfig(game.path);
             games.push_back(std::move(game));
         }
     };
@@ -333,6 +425,7 @@ std::string showGameMenu(const fs::path& folder,
         std::string library_error;
         if (library->scanFolder(folder.string(), library_error)) {
             adoptLibraryGames();
+            flushPendingPlayTime();
         } else {
             std::fprintf(stderr, "Library service unavailable: %s\n",
                          library_error.c_str());
@@ -340,13 +433,6 @@ std::string showGameMenu(const fs::path& folder,
         }
     }
 
-    // A rescan talks to the service over the network, which can take seconds.
-    // Running it on the UI thread froze the window, so it runs on a worker and
-    // the result is adopted on a later frame.
-    //
-    // GameLibrary is not thread safe, so while a scan is in flight the UI must
-    // not read from it: `scanning` suppresses the statistics line and the
-    // actions that look a game up by path.
     std::future<bool> scan_future;
     std::string scan_error;
     bool scanning = false;
@@ -523,7 +609,8 @@ std::string normalizedButtonName(const char* name) {
 
 bool gamepadButtonDown(SDL_GameController* controller,
                        const char* button_name,
-                       bool is_pico8) {
+                       bool is_pico8,
+                       Sint16 deadzone) {
     if (!controller) return false;
 
     const std::string name = normalizedButtonName(button_name);
@@ -536,7 +623,7 @@ bool gamepadButtonDown(SDL_GameController* controller,
         SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX);
     const Sint16 left_y =
         SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY);
-    constexpr Sint16 deadzone = 16000;
+
     
     if (name == "A" || (is_pico8 && name == "O"))
         return pressed(SDL_CONTROLLER_BUTTON_A);
@@ -637,12 +724,19 @@ bool loadStateFromSlot(emu::System& system,
     return system.loadState(state);
 }
 
+// `dropped_out`, when non-null, receives the path of a ROM the user
+// dragged onto the window. The caller relaunches with it rather than
+// this function swapping cores in place: the audio device, textures and
+// save-state paths are all built around the current ROM, so tearing
+// them down and coming back through the front door is both simpler and
+// safer than rebuilding them mid-frame.
 int runGenericGame(const std::string& rom_path,
                    bool mute,
                    bool start_fullscreen,
                    emu::frontend::Settings& settings,
                    emu::frontend::Hotkeys& hotkeys,
-                   bool resume_requested) {
+                   bool resume_requested,
+                   std::string* dropped_out = nullptr) {
     std::string error;
 
     const emu::frontend::GameSettings game_settings =
@@ -729,6 +823,7 @@ int runGenericGame(const std::string& rom_path,
     emu::frontend::ui::GameOverlay overlay;
     emu::frontend::ui::GalleryScreen gallery;
     emu::frontend::ui::ToastStack toasts;
+    emu::frontend::ui::PerfOverlay perf;
     emu::frontend::ui::InputMap overlay_input;
     emu::frontend::GlOverlay gl_overlay;
     bool ttf_initialized_here = false;
@@ -954,12 +1049,19 @@ int runGenericGame(const std::string& rom_path,
     bool running = true;
     std::vector<float> audio_buffer(4096);
     system->setAudioChannelMask(settings.audio_channel_mask);
+    system->setSaveBackupCount(settings.save_backups);
 
     emu::frontend::AudioSync audio_sync;
     audio_sync.configure(system->sampleRate(), settings.audio_buffer_samples);
     std::vector<float> resampled_audio;
+    // Run-ahead drains the core itself and hands this frame's samples
+    // back here, rather than the loop pulling them through readAudio.
+    std::vector<float> run_ahead_audio;
     const double refresh = system->refreshRate() > 0.0 ? system->refreshRate() : 60.0;
     const Uint64 performance_frequency = SDL_GetPerformanceFrequency();
+    // Wall time, so fast-forwarding through a grind still costs the
+    // minutes it actually took.
+    const Uint64 session_start = SDL_GetTicks64();
     const double target_frame_ticks = static_cast<double>(performance_frequency) / refresh;
     double next_frame = static_cast<double>(SDL_GetPerformanceCounter());
     Uint64 fps_window_start = SDL_GetPerformanceCounter();
@@ -1162,6 +1264,34 @@ int runGenericGame(const std::string& rom_path,
             return emu::frontend::ui::readController(gamepads[0]);
         };
         hooks.notify = notify;
+        hooks.saveFiles = [&] {
+            return emu::frontend::listSaveFiles(rom_path);
+        };
+        hooks.restoreSaveBackup = [&](const emu::frontend::SaveFile& file) {
+            std::string restore_error;
+            const bool ok = emu::frontend::restoreBackup(file, rom_path,
+                                                         restore_error);
+            if (!ok) {
+                std::fprintf(stderr, "Restore failed: %s
+",
+                             restore_error.c_str());
+            }
+            return ok;
+        };
+        hooks.deleteSaveFileHook = [&](const emu::frontend::SaveFile& file) {
+            std::string delete_error;
+            const bool ok = emu::frontend::deleteSaveFile(file, delete_error);
+            if (!ok) {
+                std::fprintf(stderr, "Delete failed: %s
+",
+                             delete_error.c_str());
+            }
+            return ok;
+        };
+        hooks.buildInfo = [] {
+            return std::string("Core list and build options are in the") +
+                   " README.";
+        };
         overlay.setHooks(std::move(hooks));
     }
 
@@ -1178,6 +1308,10 @@ int runGenericGame(const std::string& rom_path,
     }
 
     while (running) {
+        // Captured before any work so the sample covers emulation,
+        // rendering and presentation but not the frame limiter below:
+        // including the sleep would measure the limiter, not the cost.
+        const Uint64 frame_begin = SDL_GetPerformanceCounter();
         // The overlay works in render pixels and the mouse reports logical
         // ones, so both the hit tests and the paint need this before any event
         // is looked at.
@@ -1266,6 +1400,13 @@ int runGenericGame(const std::string& rom_path,
                     break;
                 case HotkeyAction::SlowMotion:
                     slow_motion = !slow_motion;
+                    break;
+                case HotkeyAction::PerfOverlay:
+                    settings.perf_overlay = !settings.perf_overlay;
+                    // Cleared on enable so the graph starts from the
+                    // moment it was asked for rather than showing
+                    // stale bars from the last time it was open.
+                    if (settings.perf_overlay) perf.reset();
                     break;
                 case HotkeyAction::UndoLoad:
                     if (undo_state.empty()) {
@@ -1363,6 +1504,18 @@ int runGenericGame(const std::string& rom_path,
                     break;
                 }
                 }
+            } else if (event.type == SDL_DROPFILE) {
+                // SDL hands over an owned C string; freeing it is the
+                // receiver's job or every drop leaks.
+                char* dropped = event.drop.file;
+                if (dropped) {
+                    const std::string path(dropped);
+                    SDL_free(dropped);
+                    if (dropped_out && !path.empty()) {
+                        *dropped_out = path;
+                        running = false;
+                    }
+                }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                 // Added events carry a device index.
                 openGamepad(event.cdevice.which);
@@ -1388,6 +1541,11 @@ int runGenericGame(const std::string& rom_path,
         rewinding = rewind_supported && !overlay.isOpen() &&
                     !gallery.isOpen() &&
                     keyboard[SDL_SCANCODE_BACKSPACE];
+        // Scaled from the percentage in settings once per frame rather
+        // than per button, and passed down because the resolver is a
+        // free function with no settings of its own.
+        const Sint16 stick_deadzone = static_cast<Sint16>(
+            std::clamp(settings.stick_deadzone, 5, 95) * 32767 / 100);
         const std::string system_name = normalizedButtonName(system->name());
         const bool is_pico8 = system_name == "PICO-8" || system_name == "PICO8";
 
@@ -1430,7 +1588,8 @@ int runGenericGame(const std::string& rom_path,
 
                 // Controller slot 0 drives port 0; slot 1 drives port 1.
                 if (port < static_cast<int>(gamepads.size()) && gamepads[port] &&
-                    gamepadButtonDown(gamepads[port], button.name, is_pico8)) {
+                    gamepadButtonDown(gamepads[port], button.name,
+                                      is_pico8, stick_deadzone)) {
                     down = true;
                 }
                 if (down) button_state |= button.mask;
@@ -1479,6 +1638,13 @@ int runGenericGame(const std::string& rom_path,
                     rewind_buffer.capacity(), rewind_buffer.seconds());
                 painted = true;
             }
+            if (settings.perf_overlay) {
+                perf.draw(target, *ui_painter, *ui_text, ui_theme,
+                          ui_metrics, window_rect,
+                          target_frame_ticks /
+                              static_cast<double>(performance_frequency));
+                painted = true;
+            }
             if (settings.input_display) {
                 // Read straight from the pad rather than from the joypad
                 // state the core sees, so the display shows what the hardware
@@ -1505,7 +1671,8 @@ int runGenericGame(const std::string& rom_path,
 
         const bool wants_overlay =
             overlay.isOpen() || gallery.isOpen() || rewinding ||
-            settings.input_display || toasts.active(SDL_GetTicks64());
+            settings.input_display || settings.perf_overlay ||
+            toasts.active(SDL_GetTicks64());
 
         if (use_opengl) {
             const bool rendered = use_crt
@@ -1633,6 +1800,13 @@ int runGenericGame(const std::string& rom_path,
             }
         }
 
+        if (settings.perf_overlay) {
+            perf.sample(
+                static_cast<double>(SDL_GetPerformanceCounter() -
+                                    frame_begin) /
+                static_cast<double>(performance_frequency));
+        }
+
         // Dividing the frame budget by a multiplier below 1 lengthens
         // each frame, which is slow motion. Fast forward wins when both
         // are on, because that is the one held deliberately. Audio needs
@@ -1654,6 +1828,15 @@ int runGenericGame(const std::string& rom_path,
         } else {
             next_frame = now;
         }
+    }
+
+    {
+        const long long played =
+            static_cast<long long>((SDL_GetTicks64() - session_start) /
+                                   1000);
+        // Under half a minute is a mis-launch, and recording those
+        // makes the totals meaningless.
+        if (played >= 30) appendPlayTime(fs::path(rom_path), played);
     }
 
     if (exited_cleanly && rewind_supported) {
@@ -1691,7 +1874,10 @@ int runGenericGame(const std::string& rom_path,
     if (!emu::frontend::saveSettings(settings)) {
         std::fprintf(stderr, "Could not save settings.ini\n");
     }
-    SDL_Quit();
+    // Left running when a drop is pending: the caller is about to
+    // re-enter, and SDL_Quit here would tear down the video subsystem
+    // it is going to need a moment later.
+    if (!dropped_out || dropped_out->empty()) SDL_Quit();
     return EXIT_SUCCESS;
 }
 
@@ -2223,6 +2409,10 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
+    // Disabled by default in SDL2, so without this the window silently
+    // ignores anything dropped on it.
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
     char* raw_base_path = SDL_GetBasePath();
     const fs::path executable_directory = raw_base_path
         ? fs::path(raw_base_path)
@@ -2288,33 +2478,53 @@ int main(int argc, char** argv) {
         return result;
     }
 
-    const SelectedSystem selected_system = selectSystemForGame(rom_path);
+    // A drop inside the game loop comes back here rather than being
+    // handled in place, so a dropped PS1 image re-runs the system
+    // dispatch below and reaches the right backend.
+    std::string pending_rom = rom_path;
+    while (true) {
+    const SelectedSystem selected_system =
+        selectSystemForGame(pending_rom);
     if (selected_system == SelectedSystem::Cancel) {
         SDL_Quit();
         return EXIT_SUCCESS;
     }
+    // The Libretro backends have their own event loops and no drop
+    // support, so these still exit rather than looping.
     if (selected_system == SelectedSystem::PS2) {
-        logLaunch("PS2", ps2_core, rom_path);
+        logLaunch("PS2", ps2_core, pending_rom);
         const int result = emu::ps2::runPs2Game(
-            ps2_core, rom_path, system_directory, fullscreen, mute, settings);
+            ps2_core, pending_rom, system_directory, fullscreen, mute,
+            settings);
         SDL_Quit();
         return result;
     }
     if (selected_system == SelectedSystem::PS1) {
-        logLaunch("PS1", ps1_core, rom_path);
+        logLaunch("PS1", ps1_core, pending_rom);
         const int result = emu::ps1::runPs1Game(
-            ps1_core, rom_path, system_directory, fullscreen, mute, settings);
+            ps1_core, pending_rom, system_directory, fullscreen, mute,
+            settings);
         SDL_Quit();
         return result;
     }
     if (selected_system == SelectedSystem::PSP) {
-        logLaunch("PSP", psp_core, rom_path);
+        logLaunch("PSP", psp_core, pending_rom);
         const int result = emu::psp::runPspGame(
-            psp_core, rom_path, system_directory, fullscreen, mute, settings);
+            psp_core, pending_rom, system_directory, fullscreen, mute,
+            settings);
         SDL_Quit();
         return result;
     }
 
-    return runGenericGame(rom_path, mute, fullscreen, settings, hotkeys,
-                          resume_requested);
+    std::string dropped;
+    const int result =
+        runGenericGame(pending_rom, mute, fullscreen, settings, hotkeys,
+                       resume_requested, &dropped);
+    if (dropped.empty()) return result;
+
+    // A dropped ROM is an explicit launch, so it never resumes the
+    // previous game's auto-save state.
+    pending_rom = dropped;
+    resume_requested = false;
+    }
 }

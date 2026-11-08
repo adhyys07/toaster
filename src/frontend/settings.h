@@ -48,27 +48,21 @@ struct Settings {
     int run_ahead_frames = 1;
     uint32_t turbo_mask = 0;
     int turbo_period = 4;
+    int stick_deadzone = 49;
     bool rumble = true;
 
-    // Pauses the game when the window loses focus. Tracked separately from
-    // the manual pause so regaining focus cannot resume a game the player
-    // paused on purpose.
     bool pause_on_focus_loss = true;
 
-    // How many times slower the slow-motion hotkey runs.
     int slow_motion_divisor = 4;
 
-    // Bit per audio channel, low bit first. All on by default.
     uint32_t audio_channel_mask = 0xFFFFFFFFu;
 
-    // Hides the edge rows real hardware kept behind the bezel.
+    bool perf_overlay = false;
+
     bool crop_overscan = false;
 
-    // Rotated copies of each battery save kept against a bad write.
     int save_backups = 3;
 
-    // Name of the colour scheme to hand the core, empty for the core's own.
-    // Only cores that report a paletteSize() use it.
     std::string palette;
 
     std::string theme = "midnight";

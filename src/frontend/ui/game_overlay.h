@@ -2,6 +2,8 @@
 
 #include "../cheat_list.h"
 #include "../hotkeys.h"
+#include "../log_buffer.h"
+#include "../save_file.h"
 #include "../settings.h"
 #include "controller_view.h"
 #include "input_map.h"
@@ -35,6 +37,9 @@ enum class OverlayPage {
     Keys,
     Cheats,
     GameOptions,
+    Saves,
+    Log,
+    About,
     Count
 };
 
@@ -66,6 +71,16 @@ struct OverlayHooks {
     std::function<ControllerSnapshot()> pad;
     std::function<void(std::string, Toast::Kind)> notify;
 
+    // Battery-save backups. Empty function pointers mean the page shows
+    // nothing rather than crashing: a core with no battery saves (CHIP-8,
+    // WASM-4) simply has an empty list.
+    std::function<std::vector<emu::frontend::SaveFile>()> saveFiles;
+    std::function<bool(const emu::frontend::SaveFile&)> restoreSaveBackup;
+    std::function<bool(const emu::frontend::SaveFile&)> deleteSaveFileHook;
+
+    // Build metadata for the About page. All optional; a blank row is shown
+    // for anything left null rather than the page being skipped.
+    std::function<std::string()> buildInfo;
 };
 
 class GameOverlay {
@@ -146,6 +161,13 @@ private:
     SDL_Rect last_panel_{};
     int hot_row_ = -1;
     int hot_slot_ = -1;
+
+    // Cached for the Saves page: rows only carry an id, and activate()
+    // needs the actual SaveFile a Restore/Delete row refers to.
+    std::vector<emu::frontend::SaveFile> save_files_;
+
+    // 0 = Debug, shows everything; higher hides the quieter levels.
+    int log_level_ = static_cast<int>(LogLevel::Info);
 };
 
 // Panel geometry, exposed so it can be tested headlessly. The slot grid mixes

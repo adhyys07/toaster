@@ -5,12 +5,17 @@
 
 namespace emu::frontend {
 
-// One row of the game library.
-//
-// This lived in main.cpp's anonymous namespace, which meant nothing outside
-// that translation unit could name it. The library screen needs it, so it
-// moved here rather than being duplicated or passed around as a template
-// parameter forever.
+// How far this game actually gets. Ordered worst to best so the list
+// can sort by it, and so "at least In-game" is a single comparison.
+enum class Compat {
+    Unknown = 0,
+    Nothing,      // does not boot
+    Loadable,     // boots to nothing useful
+    Intro,        // reaches a title or intro
+    InGame,       // plays, with problems
+    Playable      // no significant problems
+};
+
 struct GameEntry {
     std::filesystem::path path;
     std::string title;
@@ -21,12 +26,20 @@ struct GameEntry {
     std::string artwork;
     std::string tags;
     bool favorite = false;
-
-    // Unix seconds, 0 for never. The library service has carried this in
-    // RemoteGame::last_played all along; the local scan keeps it in
-    // recent.ini. Without it the Recent chip can only show everything.
     long long last_played = 0;
     int play_count = 0;
+    // Wall seconds across all sessions. Fast-forwarding through a grind
+    // still costs the minutes it took, so this is real time rather than
+    // emulated time.
+    long long seconds_played = 0;
+    Compat compat = Compat::Unknown;
+
+    // Whether an .ini beside the ROM overrides any global setting.
+    // Resolved once when the list is built, never in the renderer: the
+    // row draw runs every frame and reading a file per row would be
+    // absurd.
+    bool custom_config = false;
 };
+
 
 } // namespace emu::frontend

@@ -59,6 +59,16 @@ bool GameLibrary::markPlayed(
     return client_.markPlayed(game.id, error);
 }
 
+bool GameLibrary::addPlayTime(
+    const RemoteGame& game,
+    long long seconds,
+    std::string& error) {
+    // Not refreshed afterwards: this runs as a game is closing, and a
+    // full library re-fetch on the way out would delay the exit for a
+    // total nobody is looking at yet.
+    return client_.addPlayTime(game.id, seconds, error);
+}
+
 bool GameLibrary::setTags(
     const RemoteGame& game,
     const std::vector<std::string>& tags,

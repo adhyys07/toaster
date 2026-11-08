@@ -6,7 +6,9 @@ if(POLICY CMP0207)
     cmake_policy(SET CMP0207 NEW)
 endif()
 
-project(emu LANGUAGES C CXX)
+project(emu VERSION 0.2.0 LANGUAGES C CXX)
+
+
 
 include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 17)
@@ -44,7 +46,8 @@ add_library(emu_core
     systems/gb/ppu.cpp
     systems/gb/apu.cpp
     systems/wasm4/wasm4.cpp
-    systems/wasm4/wasm4_system.cpp)
+    systems/wasm4/wasm4_system.cpp
+    systems/wasm4/wasm3_runtime.cpp)
 target_include_directories(emu_core PUBLIC src systems/nes systems/chip8 systems/gb)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -130,6 +133,7 @@ add_executable(emu
     src/frontend/ui/game_view.cpp
     src/frontend/ui/input_map.cpp
     src/frontend/ui/library_screen.cpp
+    src/frontend/ui/perf_overlay.cpp
     systems/psp/libretro_host.cpp
     systems/psp/psp_system.cpp
     systems/ps2/ps2_system.cpp
@@ -153,6 +157,28 @@ add_executable(emu
     src/frontend/ui/big_picture.cpp
     src/frontend/audio_sync.cpp
     src/frontend/save_backup.cpp)
+# Resolved here rather than right after project(): target_include_directories
+# needs the emu target to already exist, and add_executable(emu ...) is above
+# this line.
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE TOASTER_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+endif()
+if(NOT TOASTER_COMMIT)
+    set(TOASTER_COMMIT "unknown")
+endif()
+
+string(TIMESTAMP TOASTER_BUILD_DATE "%Y-%m-%d" UTC)
+
+configure_file(src/frontend/version.h.in
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/version.h @ONLY)
+target_include_directories(emu PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
 target_include_directories(emu PRIVATE systems/psp systems/ps2 systems/ps1)
 target_link_libraries(emu PRIVATE emu_core Threads::Threads CURL::libcurl)
 

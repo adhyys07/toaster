@@ -11,8 +11,6 @@
 namespace emu::frontend {
 namespace {
 
-// libcurl wants one global init per process. The library client is used from
-// the UI thread and from the background scan worker, so this is guarded.
 void ensureCurlReady() {
     static std::once_flag once;
     std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
@@ -24,8 +22,6 @@ size_t appendBody(void* chunk, size_t size, size_t count, void* user) {
     return bytes;
 }
 
-// Performs one request. Replaces a hand-rolled socket client that could only
-// speak plain HTTP, so the service can now be reached over TLS.
 bool request(const std::string& base_url, const std::string& method,
              const std::string& path, const std::string& body,
              std::string& response, std::string& error) {
@@ -139,6 +135,7 @@ bool parseGames(const std::string& json, std::vector<RemoteGame>& games,
             return false;
         }
         const std::string object = json.substr(cursor, end - cursor + 1);
+        const int raw = static_cast<int>(number(object, "compat"));
         RemoteGame game;
         game.id = static_cast<int>(number(object, "id"));
         game.path = value(object, "path");
@@ -149,6 +146,10 @@ bool parseGames(const std::string& json, std::vector<RemoteGame>& games,
         game.favorite = boolean(object, "favorite");
         game.last_played = number(object, "last_played");
         game.play_count = static_cast<int>(number(object, "play_count"));
+        game.seconds_played =
+            static_cast<long long>(number(object, "seconds_played"));
+        game.compat = (raw >= 0 && raw <= 5) ? static_cast<Compat>(raw)
+                                             : Compat::Unknown;
         game.tags = value(object, "tags");
         if (!game.path.empty()) games.push_back(std::move(game));
         cursor = end + 1;
@@ -227,6 +228,15 @@ bool LibraryClient::markPlayed(int id, std::string& error) {
     return request(server_url_, "POST",
                    "/games/" + std::to_string(id) + "/played",
                    {}, response, error);
+}
+
+bool LibraryClient::addPlayTime(int id, long long seconds,
+                                std::string& error) {
+    std::string response;
+    return request(server_url_, "POST",
+                   "/games/" + std::to_string(id) + "/playtime",
+                   "{\"seconds\":" + std::to_string(seconds) + "}",
+                   response, error);
 }
 
 bool LibraryClient::setTags(int id, const std::vector<std::string>& tags,

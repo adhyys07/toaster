@@ -126,9 +126,6 @@ private:
     uint8_t key1_ = 0;
     bool double_speed_ = false;
 
-    std::array<uint8_t, 0x7F> hram_{};
-    std::array<uint8_t, 0xA0> oam_{};
-
     uint8_t joypad_select_ = 0x30;
     uint8_t buttons_ = 0xFF;
 

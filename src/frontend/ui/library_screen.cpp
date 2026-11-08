@@ -1,6 +1,7 @@
 #include "library_screen.h"
 
 #include "../artwork_cache.h"
+#include "../screenshot.h"
 #include "controller_view.h"
 #include "gallery.h"
 #include "game_overlay.h"
@@ -18,6 +19,7 @@
 #include <SDL_ttf.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <random>
 #include <cmath>
 #include <cstdio>
@@ -74,8 +76,148 @@ const ChipSpec kChips[] = {
     {"Game Boy", GameViewT<GameEntry>::Filter::System, SystemId::GameBoy},
     {"PS1", GameViewT<GameEntry>::Filter::System, SystemId::Ps1},
     {"PSP", GameViewT<GameEntry>::Filter::System, SystemId::Psp},
+    {"Playable", GameViewT<GameEntry>::Filter::Playable, SystemId::Unknown},
 };
 constexpr int kChipCount = static_cast<int>(sizeof(kChips) / sizeof(kChips[0]));
+
+const char* compatName(Compat compat) {
+    switch (compat) {
+    case Compat::Nothing:  return "Nothing";
+    case Compat::Loadable: return "Loadable";
+    case Compat::Intro:    return "Intro";
+    case Compat::InGame:   return "In-game";
+    case Compat::Playable: return "Playable";
+    default:               return "Untested";
+    }
+}
+
+SDL_Color compatTint(Compat compat, const Theme& theme) {
+    switch (compat) {
+    case Compat::Nothing:  return theme.danger;
+    case Compat::Loadable: return SDL_Color{201, 120, 66, 255};
+    case Compat::Intro:    return theme.gold;
+    case Compat::InGame:   return SDL_Color{150, 190, 110, 255};
+    case Compat::Playable: return theme.success;
+    // Untested is muted rather than coloured: an unknown game
+    // should not look like a verdict.
+    default:               return theme.text_muted;
+    }
+}
+
+// The right-click menu. Four entries, because the fifth obvious one -
+// editing tags - has no editor yet and a greyed-out row that never
+// becomes available is worse than no row.
+enum class MenuItem {
+    Launch,
+    OpenFolder,
+    CopyPath,
+    SetCover,
+    Count
+};
+
+const char* menuItemName(MenuItem item) {
+    switch (item) {
+    case MenuItem::Launch:     return "Launch";
+    case MenuItem::OpenFolder: return "Open containing folder";
+    case MenuItem::CopyPath:   return "Copy path";
+    case MenuItem::SetCover:   return "Set cover from screenshot";
+    default:                   return "";
+    }
+}
+
+constexpr int kMenuItemCount = static_cast<int>(MenuItem::Count);
+
+// Placed so it stays on screen: a menu opened near the right or bottom
+// edge flips back rather than falling off, which is what every native
+// menu does and what people expect without noticing.
+SDL_Rect menuRect(const SDL_Point& at, const Metrics& m,
+                  const TextCache& text, const SDL_Rect& window) {
+    int width = m.px(80);
+    for (int i = 0; i < kMenuItemCount; ++i) {
+        const int needed =
+            text.width(FontRole::Body,
+                       menuItemName(static_cast<MenuItem>(i))) +
+            m.px(28);
+        width = std::max(width, needed);
+    }
+    const int height = kMenuItemCount * m.row_height() + m.px(8);
+
+    int x = at.x;
+    int y = at.y;
+    if (x + width > window.x + window.w) x = at.x - width;
+    if (y + height > window.y + window.h) y = at.y - height;
+    x = std::max(window.x, x);
+    y = std::max(window.y, y);
+    return SDL_Rect{x, y, width, height};
+}
+
+SDL_Rect menuItemRect(const SDL_Rect& menu, const Metrics& m, int index) {
+    return SDL_Rect{menu.x + m.px(4),
+                    menu.y + m.px(4) + index * m.row_height(),
+                    menu.w - m.px(8), m.row_height()};
+}
+
+// -1 when the point is outside the menu entirely.
+int menuItemAt(const SDL_Rect& menu, const Metrics& m,
+               int x, int y) {
+    for (int i = 0; i < kMenuItemCount; ++i) {
+        if (pointInside(menuItemRect(menu, m, i), x, y)) return i;
+    }
+    return -1;
+}
+
+void drawContextMenu(SDL_Renderer* renderer, Painter& painter,
+                     TextCache& text, const Theme& theme,
+                     const Metrics& m, const SDL_Rect& menu,
+                     int hot_item) {
+    painter.shadow(menu, m.radius(), m.px(3), theme.shadow);
+    painter.roundedRectBordered(menu, m.radius(), theme.surface,
+                                theme.border, m.border());
+
+    for (int i = 0; i < kMenuItemCount; ++i) {
+        const SDL_Rect item = menuItemRect(menu, m, i);
+        if (i == hot_item) {
+            painter.roundedRect(item, m.radius_small(),
+                                theme.surface_hover);
+        }
+        text.draw(renderer, FontRole::Body,
+                  menuItemName(static_cast<MenuItem>(i)),
+                  item.x + m.px(10),
+                  item.y + (item.h - text.lineHeight(FontRole::Body)) / 2,
+                  theme.text);
+    }
+}
+
+// Reveals the file in the platform file manager. std::system is crude,
+// but the alternative is three platform APIs for a convenience action.
+void openContainingFolder(const std::filesystem::path& file) {
+#ifdef _WIN32
+    // /select, highlights the file instead of just opening the folder.
+    const std::string command =
+        "explorer.exe /select,\"" + file.string() + "\"";
+#elif defined(__APPLE__)
+    const std::string command = "open -R \"" + file.string() + "\"";
+#else
+    const std::string command =
+        "xdg-open \"" + file.parent_path().string() + "\"";
+#endif
+    std::system(command.c_str());
+}
+
+// "45m", "3h 12m", "61h". Minutes are dropped past a day because nobody
+// reads "61h 04m" as more precise than "a lot".
+std::string formatPlayTime(long long seconds) {
+    if (seconds <= 0) return "Never";
+    if (seconds < 3600) {
+        const long long minutes = seconds / 60;
+        return minutes <= 0 ? std::string("Under a minute")
+                            : std::to_string(minutes) + "m";
+    }
+    const long long hours = seconds / 3600;
+    if (hours >= 24) return std::to_string(hours) + "h";
+    return std::to_string(hours) + "h " +
+           std::to_string((seconds % 3600) / 60) + "m";
+}
 
 // "Today 14:02", "Yesterday", "3 days ago", "12 Mar 2025". An absolute
 // timestamp is precise and unreadable; this is what a library wants.
@@ -253,12 +395,29 @@ void drawGameRow(SDL_Renderer* renderer, Painter& painter, TextCache& text,
     text.drawCentered(renderer, FontRole::Small, systemShortName(system),
                       badge, theme.text_on_accent);
 
+    if (game.custom_config) {
+        // A filled ring rather than a gear glyph: this has to read at
+        // ten pixels and must not depend on the bundled font carrying a
+        // symbol for it.
+        const int size = m.px(10);
+        const SDL_Rect mark{badge.x - size - m.px(8),
+                            row.y + (row.h - size) / 2, size, size};
+        painter.roundedRect(mark, size / 2, theme.accent);
+        painter.roundedRect(inset(mark, m.px(3)), size / 4,
+                            theme.surface);
+    }
+
     const int line = text.lineHeight(FontRole::Body);
     int x = row.x + m.px(14);
 
+
+    const int dot = m.px(6);
+    painter.roundedRect(SDL_Rect{x, row.y + (row.h - dot) / 2, dot, dot},
+                        dot / 2, compatTint(game.compat, theme));
+    x += dot + m.px(8);
+
+
     if (game.favorite) {
-        // A separate glyph in its own colour, rather than "* " spliced into
-        // the title where it shifted the text and could not be styled.
         x += text.draw(renderer, FontRole::Body, "\xE2\x98\x85", x,
                        row.y + (row.h - line) / 2, theme.gold) +
              m.px(8);
@@ -399,12 +558,17 @@ void drawDetailPane(SDL_Renderer* renderer, Painter& painter, TextCache& text,
         ? std::to_string(game->play_count) +
               (game->play_count == 1 ? " time" : " times")
         : std::string("Never");
+    const std::string status = compatName(game->compat);
+    const std::string time_played = formatPlayTime(game->seconds_played);
     const std::pair<const char*, const std::string*> fields[] = {
         {"Developer", &game->developer},
         {"Year", &game->year},
         {"Genre", &game->genre},
         {"Last played", &played},
         {"Played", &plays},
+        {"Status", &status},
+        {"Time", &time_played},
+
     };
 
     for (const auto& field : fields) {
@@ -670,10 +834,71 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
             view.setSystem(kChips[index].system);
         };
 
+        // -1 when closed. Holds the view index rather than a pointer,
+        // because a background scan can reallocate the list while the
+        // menu is open.
+        long long menu_row = -1;
+        SDL_Point menu_at{};
+        int menu_hot = -1;
+
         const auto selectedGame = [&]() -> const GameEntry* {
             if (view.empty()) return nullptr;
             clampSelection();
             return &view.at(state.selected);
+        };
+
+        const auto activateMenuItem = [&](int index) {
+            const GameEntry* game = selectedGame();
+            if (!game || index < 0 || index >= kMenuItemCount) return;
+            const std::filesystem::path path = game->path;
+
+            switch (static_cast<MenuItem>(index)) {
+            case MenuItem::Launch:
+                result = path.string();
+                if (actions.markPlayed) actions.markPlayed(result);
+                running = false;
+                break;
+
+            case MenuItem::OpenFolder:
+                openContainingFolder(path);
+                break;
+
+            case MenuItem::CopyPath:
+                // SDL owns the clipboard, so no platform code here.
+                SDL_SetClipboardText(path.string().c_str());
+                toasts.push("Path copied", Toast::Kind::Info, nowMs());
+                break;
+
+            case MenuItem::SetCover: {
+                // The newest screenshot, which is almost always the
+                // one just taken for this purpose.
+                const std::vector<std::filesystem::path> shots =
+                    emu::frontend::listScreenshots(path.string());
+                if (shots.empty()) {
+                    toasts.push("No screenshots for this game",
+                                Toast::Kind::Error, nowMs());
+                    break;
+                }
+                std::string cover_error;
+                if (emu::frontend::setCoverArt(path.string(),
+                                               shots.back().string(),
+                                               cover_error)) {
+                    // Dropped so findArtwork re-runs and picks up the
+                    // new <rom>.cover.png on the next draw.
+                    artwork.clear();
+                    if (actions.rescan) actions.rescan();
+                    toasts.push("Cover updated", Toast::Kind::Info,
+                                nowMs());
+                } else {
+                    toasts.push(cover_error, Toast::Kind::Error,
+                                nowMs());
+                }
+                break;
+            }
+
+            default:
+                break;
+            }
         };
 
         const auto launchSelected = [&] {
@@ -851,7 +1076,17 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                 if (!view.empty()) state.selected = view.size() - 1;
                 break;
             case UiAction::Confirm:  launchSelected(); break;
-            case UiAction::Cancel:   running = false; break;
+            case UiAction::Cancel:
+                // The menu is the innermost thing open, so it closes
+                // first rather than the library quitting underneath it.
+                if (menu_row >= 0) {
+                    menu_row = -1;
+                    menu_hot = -1;
+                    dirty = true;
+                    break;
+                }
+                running = false;
+                break;
             case UiAction::ToggleFavorite: toggleFavorite(); break;
             case UiAction::ToggleView:     activate(kIdToggleView); break;
             case UiAction::Search:         beginSearch(); break;
@@ -1044,6 +1279,24 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                         running = false;
                         break;
 
+                    case SDL_DROPFILE: {
+                        // SDL hands over an owned C string; freeing it is
+                        // the receiver's job or every drop leaks.
+                        char* dropped = event.drop.file;
+                        if (!dropped) break;
+                        const std::string path(dropped);
+                        SDL_free(dropped);
+                        if (path.empty()) break;
+
+                        // Returned as the selection, exactly as if the row
+                        // had been launched, so the caller needs no special
+                        // case and the game still gets marked as played.
+                        result = path;
+                        if (actions.markPlayed) actions.markPlayed(result);
+                        running = false;
+                        break;
+                    }
+
                     case SDL_MOUSEMOTION: {
                         mouse_x = event.motion.x;
                         mouse_y = event.motion.y;
@@ -1060,14 +1313,60 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                             hot = under;
                             dirty = true;
                         }
+                        if (menu_row >= 0) {
+                            const SDL_Rect menu = menuRect(
+                                menu_at, metrics, text, layout.window);
+                            const int item = menuItemAt(menu, metrics,
+                                                        mouse_x,
+                                                        mouse_y);
+                            if (item != menu_hot) {
+                                menu_hot = item;
+                                dirty = true;
+                            }
+                        }
                         break;
                     }
 
                     case SDL_MOUSEBUTTONDOWN: {
-                        if (event.button.button != SDL_BUTTON_LEFT) break;
                         mouse_x = event.button.x;
                         mouse_y = event.button.y;
                         toRenderCoords(scale, &mouse_x, &mouse_y);
+
+                        if (event.button.button == SDL_BUTTON_RIGHT) {
+                            const WidgetId under = hitTestAll(
+                                layout, widgets, mouse_x, mouse_y);
+                            if (under >= kIdRowFirst) {
+                                // Right-click also moves the selection,
+                                // so the menu always acts on the row
+                                // under the cursor rather than on
+                                // whatever was selected before.
+                                state.selected = static_cast<std::size_t>(
+                                    under - kIdRowFirst);
+                                menu_row =
+                                    static_cast<long long>(state.selected);
+                                menu_at = SDL_Point{mouse_x, mouse_y};
+                                menu_hot = -1;
+                                dirty = true;
+                            }
+                            break;
+                        }
+                        if (event.button.button != SDL_BUTTON_LEFT) break;
+
+                        // With a menu open, a left click either picks an
+                        // item or dismisses it, and never also falls
+                        // through to the row underneath.
+                        if (menu_row >= 0) {
+                            const SDL_Rect menu = menuRect(
+                                menu_at, metrics, text, layout.window);
+                            const int item = menuItemAt(menu, metrics,
+                                                        mouse_x,
+                                                        mouse_y);
+                            menu_row = -1;
+                            menu_hot = -1;
+                            dirty = true;
+                            if (item >= 0) activateMenuItem(item);
+                            break;
+                        }
 
                         pressed = hitTestAll(layout, widgets, mouse_x, mouse_y);
                         hot = pressed;
@@ -1366,6 +1665,13 @@ std::string runLibraryScreen(std::vector<GameEntry>& games,
                                   layout.window, now_ms);
             gallery.draw(renderer, painter, text, theme, metrics,
                          layout.window, artwork);
+
+            if (menu_row >= 0) {
+                drawContextMenu(renderer, painter, text, theme, metrics,
+                                menuRect(menu_at, metrics, text,
+                                         layout.window),
+                                menu_hot);
+            }
 
             toasts.draw(renderer, painter, text, theme, metrics, layout.window,
                         now_ms);

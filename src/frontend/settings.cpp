@@ -484,6 +484,13 @@ Settings loadSettings() {
                 value == "true" || value == "1";
         } else if (key == "palette") {
             settings.palette = value;
+        } else if (key == "stick_deadzone") {
+            try {
+                settings.stick_deadzone =
+                    std::clamp(std::stoi(value), 5, 95);
+            } catch (...) {
+                settings.stick_deadzone = 49;
+            }
         } else if (key == "slow_motion_divisor") {
             try {
                 settings.slow_motion_divisor =
@@ -498,6 +505,8 @@ Settings loadSettings() {
             } catch (...) {
                 settings.audio_channel_mask = 0xFFFFFFFFu;
             }
+        } else if (key == "perf_overlay") {
+            settings.perf_overlay = value == "true" || value == "1";
         } else if (key == "crop_overscan") {
             settings.crop_overscan = value == "true" || value == "1";
         } else if (key == "save_backups") {
@@ -538,10 +547,13 @@ bool saveSettings(const Settings& settings) {
     file << "pause_on_focus_loss="
          << (settings.pause_on_focus_loss ? "true" : "false") << '\n';
     file << "palette=" << settings.palette << '\n';
+    file << "stick_deadzone=" << std::clamp(settings.stick_deadzone, 5, 95) << '\n';
     file << "slow_motion_divisor="
          << std::clamp(settings.slow_motion_divisor, 2, 8) << '\n';
     file << "audio_channel_mask=" << settings.audio_channel_mask
          << '\n';
+    file << "perf_overlay="
+         << (settings.perf_overlay ? "true" : "false") << '\n';
     file << "crop_overscan="
          << (settings.crop_overscan ? "true" : "false") << '\n';
     file << "save_backups=" << std::clamp(settings.save_backups, 0, 9)

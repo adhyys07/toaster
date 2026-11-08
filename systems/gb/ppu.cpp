@@ -7,11 +7,6 @@
 namespace emu::gb {
 namespace {
 
-// DMG panel colours, index 0 lightest.
-void PPU::setColors(const uint32_t* colors) {
-    for (int i = 0; i < 4; ++i) colors_[i] = colors[i];
-}
-
 // A palette register packs four 2-bit shades, low bits first.
 inline uint8_t shadeOf(uint8_t palette, uint8_t pixel) {
     return static_cast<uint8_t>((palette >> (pixel * 2)) & 0x03);
@@ -24,6 +19,13 @@ constexpr int kVisibleLines = 144;
 constexpr int kTotalLines = 154;
 
 } // namespace
+
+// Index 0 is the lightest shade. Only the DMG path reads these; a CGB
+// game supplies its own colours through palette RAM.
+void PPU::setColors(const uint32_t* colors) {
+    if (!colors) return;
+    for (int i = 0; i < 4; ++i) colors_[i] = colors[i];
+}
 
 PPU::PPU(Memory& memory)
     : memory_(memory) {
