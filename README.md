@@ -36,11 +36,11 @@ build/emu.exe
 ```
 
 That opens the library, which reads the `games/` folder. Drop a `.nes`, `.gb`
-or `.ch8` file in there and press Enter, those three systems are built in and
+or `.ch8` file in there and press Enter, those four systems are built in and
 need nothing else. PlayStation and PSP also need their own BIOS and plug-in
-cores, neither of which Toaster ships.
+cores, neither of which Toaster ships due to copyright issues.
 
-Press **F1** during a game for the pause menu: saves, settings, controls,
+Press **F1** during a game to access the pause menu that includes saves, settings, controls,
 cheats and themes all live there.
 
 

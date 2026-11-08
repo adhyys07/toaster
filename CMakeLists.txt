@@ -8,8 +8,6 @@ endif()
 
 project(emu VERSION 0.2.0 LANGUAGES C CXX)
 
-
-
 include(GNUInstallDirs)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
