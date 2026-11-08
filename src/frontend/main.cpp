@@ -1272,8 +1272,7 @@ int runGenericGame(const std::string& rom_path,
             const bool ok = emu::frontend::restoreBackup(file, rom_path,
                                                          restore_error);
             if (!ok) {
-                std::fprintf(stderr, "Restore failed: %s
-",
+                std::fprintf(stderr, "Restore failed: %s\n",
                              restore_error.c_str());
             }
             return ok;
@@ -1282,8 +1281,7 @@ int runGenericGame(const std::string& rom_path,
             std::string delete_error;
             const bool ok = emu::frontend::deleteSaveFile(file, delete_error);
             if (!ok) {
-                std::fprintf(stderr, "Delete failed: %s
-",
+                std::fprintf(stderr, "Delete failed: %s\n",
                              delete_error.c_str());
             }
             return ok;

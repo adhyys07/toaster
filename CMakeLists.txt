@@ -156,7 +156,9 @@ add_executable(emu
     src/frontend/link_cable.cpp
     src/frontend/ui/big_picture.cpp
     src/frontend/audio_sync.cpp
-    src/frontend/save_backup.cpp)
+    src/frontend/save_backup.cpp
+    src/frontend/save_file.cpp
+    src/frontend/log_buffer.cpp)
 # Resolved here rather than right after project(): target_include_directories
 # needs the emu target to already exist, and add_executable(emu ...) is above
 # this line.
