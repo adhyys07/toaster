@@ -47,9 +47,6 @@
 #include "ui/layout.h"
 #include "ui/library_screen.h"
 #include "ui/theme_io.h"
-#include "movie.h"
-#include "palette_io.h"
-#include "rumble.h"
 #include "run_ahead.h"
 #include "turbo.h"
 
@@ -60,10 +57,6 @@
 #endif
 
 namespace {
-// Upper bound on a core's port count, so one frame of input can live in a
-// fixed array that the movie recorder can take a pointer to.
-constexpr int kMaxPorts = 8;
-
 void printUsage(const char* exe) {
     std::printf(
         "usage: %s [ROM] [options]\n"
@@ -109,17 +102,6 @@ std::string gamePathKey(const fs::path& path) {
     return emu::frontend::libraryPathKey(path);
 }
 
-// Where an input replay for a game lives: one file per ROM beside the
-// executable, so recording a second take overwrites the first rather than
-// leaving files the player never asked for.
-fs::path moviePathFor(const std::string& rom_path) {
-    char* raw = SDL_GetBasePath();
-    const fs::path base = raw ? fs::path(raw) : fs::current_path();
-    if (raw) SDL_free(raw);
-    return base / "replays" /
-           (fs::path(rom_path).stem().string() + ".tsmv");
-}
-
 // Where the hotkey bindings live: one file beside the executable, shared by
 // the library screen and the game loop, so rebinding in one is visible in the
 // other without a restart.
@@ -130,9 +112,6 @@ fs::path hotkeyFile() {
     return base / "hotkeys.ini";
 }
 
-// Last-played times for installs with no library service. The service keeps
-// these in RemoteGame; locally they go in recent.ini as
-// "<path>|<unix seconds>|<play count>". Favourites already work this way.
 struct PlayRecord {
     long long last_played = 0;
     int play_count = 0;
@@ -711,16 +690,6 @@ int runGenericGame(const std::string& rom_path,
         return EXIT_FAILURE;
     }
 
-    // After loadRom, because a core only knows how many palette entries it
-    // wants once a ROM has established what it is emulating.
-    {
-        std::string palette_error;
-        if (!emu::frontend::applyPalette(*system, settings.palette,
-                                         palette_error)) {
-            std::fprintf(stderr, "Palette: %s\n", palette_error.c_str());
-        }
-    }
-
     const emu::VideoFrame initial = system->video();
     if (!initial.pixels || initial.width <= 0 || initial.height <= 0) {
         std::fprintf(stderr, "%s returned an invalid video frame\n", system->name());
@@ -944,16 +913,8 @@ int runGenericGame(const std::string& rom_path,
     int texture_height = 0;
     SDL_Texture* texture = nullptr;
 
-    // What the player should see this frame. With run-ahead on, the core has
-    // already been rewound by the time we draw, so its own framebuffer holds
-    // the old picture; RunAhead keeps a copy of the predicted one. With
-    // run-ahead off this is system->video() unchanged.
-    const auto displayFrame = [&]() -> emu::VideoFrame {
-        return run_ahead.frame(*system);
-    };
-
     auto updateTexture = [&]() -> bool {
-        const emu::VideoFrame frame = displayFrame();
+        const emu::VideoFrame frame = system->video();
         if (!frame.pixels || frame.width <= 0 || frame.height <= 0) return false;
 
         if (!texture || frame.width != texture_width || frame.height != texture_height) {
@@ -1010,22 +971,6 @@ int runGenericGame(const std::string& rom_path,
     bool paused = false;
     bool frame_advance = false;
     bool fast_forward = false;
-
-    // Tracked apart from `paused` so regaining focus cannot resume a game the
-    // player paused deliberately.
-    bool paused_by_focus = false;
-
-    // Run-ahead drains the core itself, so its samples for the frame arrive
-    // here rather than through readAudio.
-    std::vector<float> run_ahead_audio;
-
-    emu::frontend::Turbo turbo;
-    turbo.configure(settings.turbo_mask, settings.turbo_period);
-
-    emu::frontend::Rumble rumble;
-    rumble.setEnabled(settings.rumble);
-
-    emu::frontend::Movie movie;
 
     const auto toggleFullscreen = [&] {
         const bool is_fullscreen =
@@ -1086,9 +1031,6 @@ int runGenericGame(const std::string& rom_path,
             std::fprintf(stderr,
                          "Save state slot %d is unsupported or failed\n",
                          slot);
-            // Longer and harder than the success pulse, so the two are
-            // distinguishable without looking away from the game.
-            rumble.pulse(gamepads[0], 0.60f, 120);
             return false;
         }
         std::string shot_error;
@@ -1097,7 +1039,6 @@ int runGenericGame(const std::string& rom_path,
             saveStateManager().thumbnailPath(slot, gamePathKey(rom_path)),
             shot_error);
         if (ui_art) ui_art->clear();
-        rumble.pulse(gamepads[0], 0.35f, 60);
         return true;
     };
 
@@ -1309,10 +1250,8 @@ int runGenericGame(const std::string& rom_path,
                 case HotkeyAction::QuickLoad:
                     if (loadStateFromSlot(*system, rom_path, 1)) {
                         rewind_buffer.clear();
-                        rumble.pulse(gamepads[0], 0.35f, 60);
                     } else {
                         std::fprintf(stderr, "Quick load failed\n");
-                        rumble.pulse(gamepads[0], 0.60f, 120);
                     }
                     break;
                 case HotkeyAction::Screenshot: {
@@ -1362,74 +1301,9 @@ int runGenericGame(const std::string& rom_path,
                 case HotkeyAction::ToggleInputDisplay:
                     settings.input_display = !settings.input_display;
                     break;
-                case HotkeyAction::RecordMovie: {
-                    using Mode = emu::frontend::Movie::Mode;
-                    if (movie.mode() == Mode::Recording) {
-                        // Stopping is what writes the file: the recorder only
-                        // knows the frame count once recording ends.
-                        const std::filesystem::path file =
-                            moviePathFor(rom_path);
-                        std::string movie_error;
-                        if (movie.save(file, *system, movie_error)) {
-                            notify("Replay saved: " +
-                                       std::to_string(movie.frameCount()) +
-                                       " frames",
-                                   emu::frontend::ui::Toast::Kind::Info);
-                        } else {
-                            notify("Could not save the replay: " + movie_error,
-                                   emu::frontend::ui::Toast::Kind::Error);
-                        }
-                        movie.stop();
-                    } else {
-                        movie.stop();
-                        std::string movie_error;
-                        if (movie.startRecording(*system, movie_error)) {
-                            notify("Recording input",
-                                   emu::frontend::ui::Toast::Kind::Info);
-                        } else {
-                            notify(movie_error,
-                                   emu::frontend::ui::Toast::Kind::Error);
-                        }
-                    }
-                    break;
-                }
-                case HotkeyAction::PlayMovie: {
-                    using Mode = emu::frontend::Movie::Mode;
-                    if (movie.mode() == Mode::Replaying) {
-                        movie.stop();
-                        notify("Replay stopped",
-                               emu::frontend::ui::Toast::Kind::Info);
-                        break;
-                    }
-                    const std::filesystem::path file = moviePathFor(rom_path);
-                    std::string movie_error;
-                    if (movie.startReplay(file, *system, movie_error)) {
-                        // The replay restored its own starting state, so any
-                        // rewind history now belongs to a timeline that no
-                        // longer exists.
-                        rewind_buffer.clear();
-                        paused = false;
-                        notify("Replaying " +
-                                   std::to_string(movie.frameCount()) +
-                                   " frames",
-                               emu::frontend::ui::Toast::Kind::Info);
-                    } else {
-                        notify(movie_error,
-                               emu::frontend::ui::Toast::Kind::Error);
-                    }
-                    break;
-                }
                 case HotkeyAction::Reset:
                     system->reset();
                     rewind_buffer.clear();
-                    // A reset invalidates a recording's starting state, and
-                    // silently carrying on would produce a replay that does
-                    // not reproduce.
-                    if (movie.mode() != emu::frontend::Movie::Mode::Idle) {
-                        movie.stop();
-                        notify("Reset stopped the replay",
-                               emu::frontend::ui::Toast::Kind::Info);
-                    }
                     break;
                 case HotkeyAction::Quit:
                     running = false;
@@ -1459,22 +1333,6 @@ int runGenericGame(const std::string& rom_path,
                     break;
                 }
                 }
-            } else if (event.type == SDL_WINDOWEVENT) {
-                // Coming back to a dead character because the game kept
-                // running behind another window is what this prevents. The
-                // menus pause on their own, so this only acts when none is up.
-                if (settings.pause_on_focus_loss && !overlay.isOpen() &&
-                    !gallery.isOpen()) {
-                    if (event.window.event == SDL_WINDOWEVENT_FOCUS_LOST) {
-                        paused_by_focus = true;
-                        paused = true;
-                    } else if (event.window.event ==
-                                   SDL_WINDOWEVENT_FOCUS_GAINED &&
-                               paused_by_focus) {
-                        paused_by_focus = false;
-                        paused = false;
-                    }
-                }
             } else if (event.type == SDL_CONTROLLERDEVICEADDED) {
                 // Added events carry a device index.
                 openGamepad(event.cdevice.which);
@@ -1503,15 +1361,7 @@ int runGenericGame(const std::string& rom_path,
         const std::string system_name = normalizedButtonName(system->name());
         const bool is_pico8 = system_name == "PICO-8" || system_name == "PICO8";
 
-        // One tick per emulated frame, so the pulse rate is in frames and
-        // does not drift with the wall clock.
-        turbo.tick();
-
-        std::array<uint32_t, kMaxPorts> port_input{};
-        const int port_count =
-            std::min(system->portCount(), kMaxPorts);
-
-        for (int port = 0; port < port_count; ++port) {
+        for (int port = 0; port < system->portCount(); ++port) {
             uint32_t button_state = 0;
 
             for (const emu::ButtonInfo& button : system->buttons()) {
@@ -1553,33 +1403,11 @@ int runGenericGame(const std::string& rom_path,
                     gamepadButtonDown(gamepads[port], button.name, is_pico8)) {
                     down = true;
                 }
-                // Applied once the binding has resolved, so turbo follows
-                // the action rather than one particular key or pad button.
-                if (port == 0 && down &&
-                    turbo.suppressed(keyboardBindingIndex(button.name))) {
-                    down = false;
-                }
-
                 if (down) button_state |= button.mask;
             }
 
-            port_input[port] = button_state;
-        }
-
-        // A replay owns the input outright: reading the pad as well would let
-        // a stray press desync the run from the recording.
-        if (movie.mode() == emu::frontend::Movie::Mode::Replaying) {
-            if (!movie.next(port_input.data(), port_count)) {
-                notify("Replay finished.",
-                       emu::frontend::ui::Toast::Kind::Info);
-            }
-        } else if (movie.mode() == emu::frontend::Movie::Mode::Recording) {
-            movie.record(port_input.data(), port_count);
-        }
-
-        for (int port = 0; port < port_count; ++port) {
             system->setInput(port, (overlay.isOpen() || gallery.isOpen())
-                                       ? 0u : port_input[port]);
+                                       ? 0u : button_state);
         }
 
         if (rewinding) {
@@ -1651,9 +1479,9 @@ int runGenericGame(const std::string& rom_path,
 
         if (use_opengl) {
             const bool rendered = use_crt
-                ? crt.render(displayFrame(), system->aspectRatio(),
+                ? crt.render(system->video(), system->aspectRatio(),
                              settings.sharpness, error)
-                : fsr.render(displayFrame(), system->aspectRatio(),
+                : fsr.render(system->video(), system->aspectRatio(),
                              settings.sharpness, error);
             if (!rendered) {
                 std::fprintf(stderr, "%s render failed: %s\n",
@@ -1706,7 +1534,7 @@ int runGenericGame(const std::string& rom_path,
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
             SDL_RenderClear(renderer);
 
-            const emu::VideoFrame frame = displayFrame();
+            const emu::VideoFrame frame = system->video();
             const SDL_Rect viewport = emu::frontend::calculateViewport(
                 window_width, window_height, frame.width, frame.height,
                 system->aspectRatio(), settings.scaling);
@@ -1736,31 +1564,19 @@ int runGenericGame(const std::string& rom_path,
         }
 
         if (audio) {
-            // Run-ahead drained the core for this frame already and kept
-            // only the audio from the frame that really happened. Pulling
-            // again here would fetch the predicted frames' samples, so every
-            // frame would play run_ahead_frames times over.
-            float* samples = audio_buffer.data();
-            size_t count = 0;
-            if (run_ahead.enabled()) {
-                samples = run_ahead_audio.data();
-                count = run_ahead_audio.size();
-            } else {
-                count = system->readAudio(audio_buffer.data(),
-                                          audio_buffer.size());
-            }
+            const size_t count = system->readAudio(audio_buffer.data(), audio_buffer.size());
             if (count > 0) {
                 const float gain = settings.mute
                     ? 0.0f
                     : static_cast<float>(std::clamp(settings.volume, 0, 100)) / 100.0f;
                 for (size_t i = 0; i < count; ++i) {
-                    samples[i] *= gain;
+                    audio_buffer[i] *= gain;
                 }
                 if (SDL_GetQueuedAudioSize(audio) >
                     static_cast<Uint32>(system->sampleRate() * sizeof(float) / 4)) {
                     SDL_ClearQueuedAudio(audio);
                 }
-                SDL_QueueAudio(audio, samples,
+                SDL_QueueAudio(audio, audio_buffer.data(),
                                static_cast<Uint32>(count * sizeof(float)));
             }
         }
@@ -1796,11 +1612,7 @@ int runGenericGame(const std::string& rom_path,
     gl_overlay.shutdown();
 
     for (SDL_GameController* gamepad : gamepads) {
-        if (!gamepad) continue;
-        // A motor left running keeps buzzing after the window closes, because
-        // the pulse duration outlives the process.
-        rumble.stop(gamepad);
-        SDL_GameControllerClose(gamepad);
+        if (gamepad) SDL_GameControllerClose(gamepad);
     }
     // Only tear SDL_ttf down if the overlay is what brought it up.
     if (ttf_initialized_here) TTF_Quit();
